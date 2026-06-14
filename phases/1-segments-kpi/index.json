@@ -29,7 +29,10 @@
     {
       "step": 3,
       "name": "excel-segments",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-06-14T14:28:31+0900",
+      "completed_at": "2026-06-14T14:42:10+0900",
+      "summary": "excel.py 확장: 분해 데이터(segments.build_disaggregation 출력)가 있을 때만 Segments/Geography/Products 시트 추가(행=멤버·열=연도, 다기업 블록 가로). REVIEW 플래그(unknown-axis/custom-tag/does-not-reconcile)와 회사 고유 KPI 후보(KPI (review))는 기존 Review 시트에 합류(별도 시트 아님, 연노랑 재사용·새 색 금지). reconcile(정보성)은 각 분해 시트 하단에 Σmembers vs reported total 로 병기. 분해 값 출처(축/멤버/group)는 Provenance 에 기록. group/축 라벨은 canonical_map.KNOWN_AXES 에서 파생(하드코딩 0). CompanyResult 에 segments 필드 추가(기본 {}). 기존 6시트 구성·명명 유지. 신규 워크북 스모크 테스트 1건 추가, 27/27 통과."
     },
     {
       "step": 4,

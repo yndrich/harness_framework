@@ -168,13 +168,17 @@ def normalize_company(facts_obj, statements, years: list) -> dict:
 class CompanyResult:
     """한 기업의 정규화 결과 + 식별 정보."""
 
-    def __init__(self, ticker, title, cik10, entity, years, data):
+    def __init__(self, ticker, title, cik10, entity, years, data,
+                 segments=None):
         self.ticker = ticker
         self.title = title
         self.cik10 = cik10
         self.entity = entity
         self.years = years
         self.data = data   # {statement_key: {line_key: {year: cell}}}
+        # segments.build_disaggregation 출력(분해 group + flags + reconcile,
+        # 선택적으로 kpis). 비어 있으면 {} — excel 은 분해 시트를 생략한다.
+        self.segments = segments or {}
 
     def cell(self, statement_key, line_key, year):
         return self.data.get(statement_key, {}).get(line_key, {}).get(year)

@@ -561,6 +561,72 @@ def test_segments_reconcile_flag_when_unbalanced_no_adjustment():
                for t, d in out["flags"]), out["flags"]
 
 
+# ---- excel-segments (phase 1-segments-kpi, step 3) -------------------
+def _sheet_xml_by_name(z, name):
+    """workbook.xml 의 시트 순서로 해당 이름의 sheetN.xml 을 찾아 디코드."""
+    import re
+    wb_xml = z.read("xl/workbook.xml").decode()
+    order = re.findall(r'<sheet name="([^"]+)"', wb_xml)
+    idx = order.index(name) + 1
+    return z.read(f"xl/worksheets/sheet{idx}.xml").decode()
+
+
+def test_workbook_with_segments():
+    """분해 데이터(step 2 출력 형태) → Segments/Geography/Products 시트 추가 +
+    Review 에 segment REVIEW 플래그·KPI 합류(별도 시트 아님) + Provenance 에
+    분해 출처(축/멤버) 기록. 네트워크 없음."""
+    cf = make_facts({
+        "Revenues": _usd([dur(100, 2023, "a", "2024-02-01"),
+                          dur(120, 2024, "b", "2025-02-01")]),
+    })
+    years = nz.available_years(cf, STATEMENTS)
+    data = nz.normalize_company(cf, STATEMENTS, years)
+    geo = "srt:StatementGeographicalAxis"
+    seg_axis = "us-gaap:StatementBusinessSegmentsAxis"
+    unknown = "us-gaap:SomeUnrecognizedAxis"
+    facts = [
+        seg_fact(_REV, 120, 2024, {}),                       # 무차원 총계
+        seg_fact(_REV, 70, 2024, {geo: "country:US"}),       # geography
+        seg_fact(_REV, 50, 2024, {geo: "us-gaap:NonUsMember"}),
+        seg_fact(_REV, 80, 2024, {seg_axis: "aapl:RetailMember"}),    # custom-tag
+        seg_fact(_REV, 40, 2024, {seg_axis: "aapl:WholesaleMember"}),
+        seg_fact(_REV, 100, 2024, {unknown: "us-gaap:FooMember"}),    # unknown-axis
+    ]
+    disagg = seg.build_disaggregation(facts, years, _REVENUE_TAGS)
+    # 회사 고유 KPI 후보(step 4 cli-integration 이 채울 형태) — 자동 표준화 금지.
+    disagg["kpis"] = [{"concept": "aapl:ActiveInstalledBase", "member": "",
+                       "year": 2024, "value": 2200000000, "unit": "devices"}]
+    comp = nz.CompanyResult("TEST", "Test Co", "0000000001", "Test Co",
+                            years, data, segments=disagg)
+    out = os.path.join(os.path.dirname(__file__), "_smoke_seg.xlsx")
+    write_workbook([comp], STATEMENTS, out)
+    assert zipfile.is_zipfile(out)
+    with zipfile.ZipFile(out) as z:
+        names = z.namelist()
+        assert "[Content_Types].xml" in names and "xl/workbook.xml" in names
+        wb = z.read("xl/workbook.xml").decode()
+        # 기존 6시트 + 분해 3시트가 모두 존재.
+        for sheet in ["Income Statement", "Balance Sheet", "Cash Flow",
+                      "Segments", "Geography", "Products",
+                      "Comparison", "Review", "Provenance"]:
+            assert sheet in wb, sheet
+        # 분해 멤버가 해당 group 시트에 들어갔는지 (행=멤버).
+        assert "country:US" in _sheet_xml_by_name(z, "Geography")
+        assert "aapl:RetailMember" in _sheet_xml_by_name(z, "Segments")
+        # Review 에 segment REVIEW 플래그·KPI 가 합류 (별도 시트가 아니라 Review).
+        review = _sheet_xml_by_name(z, "Review")
+        assert "REVIEW" in review
+        assert "unknown-axis" in review
+        assert "custom-tag" in review
+        assert "KPI (review)" in review
+        assert "aapl:ActiveInstalledBase" in review
+        # 분해 값도 Provenance 에 출처(축/멤버)와 함께 기록.
+        prov = _sheet_xml_by_name(z, "Provenance")
+        assert "country:US" in prov          # 멤버
+        assert geo in prov                   # 축 = 출처
+    os.remove(out)
+
+
 # ---- 독립 실행 러너 (pytest 없이도 동작) -------------------------------
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
