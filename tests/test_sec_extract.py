@@ -18,6 +18,7 @@ from sec_extract import xlsx
 from sec_extract import submissions as sub
 from sec_extract import xbrl_instance as xi
 from sec_extract import segments as seg
+from sec_extract import cli
 
 
 # ---- 합성 companyfacts 빌더 -------------------------------------------
@@ -625,6 +626,167 @@ def test_workbook_with_segments():
         assert "country:US" in prov          # 멤버
         assert geo in prov                   # 축 = 출처
     os.remove(out)
+
+
+# ---- cli-integration (phase 1-segments-kpi, step 4) ------------------
+# 합성 inline-XBRL(주.htm). 무차원 총계 + geography(표준 멤버) + segment(회사 고유
+# 멤버) 차원 fact 가 섞여 있다. 모든 컨텍스트 기간 end=2024-09-28(연도 라벨=2024).
+_CLI_INLINE_DOC = """<?xml version="1.0" encoding="UTF-8"?>
+<xhtml xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+       xmlns:xbrli="http://www.xbrl.org/2003/instance"
+       xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+       xmlns:us-gaap="http://fasb.org/us-gaap/2024"
+       xmlns:srt="http://fasb.org/srt/2024">
+  <xbrli:context id="c-total">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c-us">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">country:US</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c-nonus">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">us-gaap:NonUsMember</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c-retail">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">aapl:RetailMember</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c-wholesale">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000000001</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementBusinessSegmentsAxis">aapl:WholesaleMember</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-total" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">120</ix:nonFraction>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-us" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">70</ix:nonFraction>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-nonus" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">50</ix:nonFraction>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-retail" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">80</ix:nonFraction>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-wholesale" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">40</ix:nonFraction>
+</xhtml>"""
+
+
+class _FakePipelineClient:
+    """SecClient(get_json/get_text) 둘 다 흉내내는 스텁 (네트워크 없음)."""
+
+    def __init__(self, json_map, text_map):
+        self.json_map = json_map
+        self.text_map = text_map
+        self.requested = []
+
+    def get_json(self, url, refresh=False):
+        self.requested.append(url)
+        return self.json_map[url]
+
+    def get_text(self, url, refresh=False):
+        self.requested.append(url)
+        return self.text_map[url]
+
+
+def _cli_pipeline_maps():
+    """resolve→facts→submissions→index→instance 전 구간 합성 응답(URL→데이터)."""
+    cik10 = "0000000001"
+    accn = "0000000001-24-000001"
+    accn_nodash = accn.replace("-", "")
+    base = f"https://www.sec.gov/Archives/edgar/data/1/{accn_nodash}/"
+    json_map = {
+        "https://www.sec.gov/files/company_tickers.json": {
+            "0": {"cik_str": 1, "ticker": "TEST", "title": "Test Co"}},
+        f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json": {
+            "entityName": "Test Co", "cik": 1, "facts": {"us-gaap": {
+                "Revenues": _usd([dur(100, 2023, "x", "2024-02-01"),
+                                  dur(120, 2024, "y", "2025-02-01")]),
+            }}},
+        f"https://data.sec.gov/submissions/CIK{cik10}.json": {
+            "cik": "1", "filings": {"recent": {
+                "accessionNumber": [accn],
+                "form": ["10-K"],
+                "filingDate": ["2024-11-01"],
+                "reportDate": ["2024-09-28"],
+                "primaryDocument": ["test-20240928.htm"],
+                "isXBRL": [1],
+                "isInlineXBRL": [1],
+            }}},
+        base + "index.json": {"directory": {"item": [
+            {"name": "test-20240928.htm", "type": "10-K"},
+            {"name": "test-20240928_htm.xml", "type": "XML"},
+        ]}},
+    }
+    text_map = {base + "test-20240928.htm": _CLI_INLINE_DOC}
+    return json_map, text_map
+
+
+def test_cli_segments_pipeline_offline():
+    """--segments: 가짜 client 로 cli 파이프라인 끝까지 → 분해 시트/값/플래그/출처.
+
+    실제 SEC 호출 없음. 분해 값이 normalize 와 동일 기준(기간 end=2024)으로 열에
+    정렬되는지, REVIEW(회사 고유 멤버)와 출처(축)가 기존 시트에 합류하는지 검증."""
+    json_map, text_map = _cli_pipeline_maps()
+    client = _FakePipelineClient(json_map, text_map)
+    out = os.path.join(os.path.dirname(__file__), "_smoke_cli_seg.xlsx")
+    rc = cli.main(["TEST", "--segments", "-o", out], client=client)
+    assert rc == 0, rc
+    assert zipfile.is_zipfile(out)
+    with zipfile.ZipFile(out) as z:
+        wb = z.read("xl/workbook.xml").decode()
+        for sheet in ["Income Statement", "Balance Sheet", "Cash Flow",
+                      "Segments", "Geography", "Products",
+                      "Comparison", "Review", "Provenance"]:
+            assert sheet in wb, sheet
+        geo = _sheet_xml_by_name(z, "Geography")
+        assert "country:US" in geo
+        assert "70000000" in geo          # 70 * 10^6, 기간 end=2024 열에 정렬
+        segs = _sheet_xml_by_name(z, "Segments")
+        assert "aapl:RetailMember" in segs
+        review = _sheet_xml_by_name(z, "Review")
+        assert "REVIEW" in review and "custom-tag" in review
+        prov = _sheet_xml_by_name(z, "Provenance")
+        assert "country:US" in prov                       # 멤버
+        assert "srt:StatementGeographicalAxis" in prov    # 축 = 출처
+    os.remove(out)
+    # 인스턴스는 SecClient.get_text 경유로만 취득(직접 urllib 금지).
+    assert any(u.endswith("test-20240928.htm") for u in client.requested)
+
+
+def test_cli_segments_off_is_regression_safe():
+    """--segments 꺼짐: 분해 시트 없음 + submissions/인스턴스 네트워크 호출 없음."""
+    json_map, text_map = _cli_pipeline_maps()
+    client = _FakePipelineClient(json_map, text_map)
+    out = os.path.join(os.path.dirname(__file__), "_smoke_cli_noseg.xlsx")
+    rc = cli.main(["TEST", "-o", out], client=client)
+    assert rc == 0, rc
+    with zipfile.ZipFile(out) as z:
+        wb = z.read("xl/workbook.xml").decode()
+        for sheet in ["Income Statement", "Balance Sheet", "Cash Flow",
+                      "Comparison", "Review", "Provenance"]:
+            assert sheet in wb, sheet
+        for sheet in ["Segments", "Geography", "Products"]:
+            assert sheet not in wb, sheet
+    os.remove(out)
+    # 회귀: 꺼짐이면 submissions/인스턴스 네트워크를 전혀 건드리지 않는다.
+    assert not any("submissions" in u for u in client.requested)
+    assert not any(u.endswith(".htm") for u in client.requested)
 
 
 # ---- 독립 실행 러너 (pytest 없이도 동작) -------------------------------
