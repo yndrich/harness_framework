@@ -12,11 +12,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sec_extract.facts import CompanyFacts
 from sec_extract import normalize as nz
-from sec_extract.canonical_map import STATEMENTS
+from sec_extract.canonical_map import STATEMENTS, KNOWN_AXES
 from sec_extract.excel import write_workbook
 from sec_extract import xlsx
 from sec_extract import submissions as sub
 from sec_extract import xbrl_instance as xi
+from sec_extract import segments as seg
 
 
 # ---- 합성 companyfacts 빌더 -------------------------------------------
@@ -441,6 +442,123 @@ def test_parse_instance_url_uses_client_get_text():
     facts = xi.parse_instance_url(client, url)
     assert client.requested == [url]   # 직접 urllib 금지, SecClient 만
     assert len(facts) == 2
+
+
+# ---- segment-mapping (phase 1-segments-kpi, step 2) -------------------
+# 합성 차원 fact (xbrl_instance.parse_instance 출력 형태). 매출(revenue) 후보
+# 태그는 canonical_map 의 revenue 항목과 공유한다.
+_REVENUE_TAGS = STATEMENTS[0]["lines"][0]["tags"]
+_REV = "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+
+
+def seg_fact(concept, value, year, dims):
+    """xbrl_instance fact 모양의 연간(duration) 합성 fact."""
+    return {"concept": concept, "value": value, "raw_text": str(value),
+            "unit": "usd", "decimals": "-6", "context_ref": "c",
+            "dims": dims, "start": f"{year}-01-01", "end": f"{year}-12-31",
+            "instant": None}
+
+
+def test_segments_known_axes_aggregate():
+    """알려진 축(geography/product) → 올바른 group, 멤버×연도 집계 정확, 플래그 없음."""
+    geo, prod = "srt:StatementGeographicalAxis", "srt:ProductOrServiceAxis"
+    facts = [
+        seg_fact(_REV, 391035, 2024, {}),                 # 무차원 총계
+        seg_fact(_REV, 383285, 2023, {}),
+        seg_fact(_REV, 167045, 2024, {geo: "country:US"}),
+        seg_fact(_REV, 223990, 2024, {geo: "us-gaap:NonUsMember"}),
+        seg_fact(_REV, 294866, 2024, {prod: "us-gaap:ProductMember"}),
+        seg_fact(_REV, 96169, 2024, {prod: "us-gaap:ServiceMember"}),
+    ]
+    out = seg.build_disaggregation(facts, [2023, 2024], _REVENUE_TAGS)
+    assert KNOWN_AXES[geo] == "geography" and KNOWN_AXES[prod] == "product"
+    assert out["geography"]["country:US"][2024] == 167045
+    assert out["geography"]["us-gaap:NonUsMember"][2024] == 223990
+    assert out["product"]["us-gaap:ProductMember"][2024] == 294866
+    assert out["product"]["us-gaap:ServiceMember"][2024] == 96169
+    # 표준 네임스페이스 멤버 + 합=총계 → REVIEW 플래그 전혀 없음.
+    assert out["flags"] == [], out["flags"]
+
+
+def test_segments_unknown_axis_review():
+    """미인식 축 → unknown-axis REVIEW, 임의 그룹에 넣지 않는다."""
+    unk = "us-gaap:SomeUnrecognizedAxis"
+    assert unk not in KNOWN_AXES
+    facts = [seg_fact(_REV, 100, 2024, {unk: "us-gaap:FooMember"})]
+    out = seg.build_disaggregation(facts, [2024], _REVENUE_TAGS)
+    assert any(t == "REVIEW" and d.startswith("unknown-axis") and unk in d
+               for t, d in out["flags"]), out["flags"]
+    # 모르는 축은 어떤 표준 그룹에도 욱여넣지 않는다.
+    assert "segment" not in out and "geography" not in out and "product" not in out
+
+
+def test_segments_custom_member_review_and_aggregated():
+    """회사 고유 네임스페이스 멤버 → custom-tag REVIEW. 단, 축은 표준이라 그룹엔 보존."""
+    seg_axis = "us-gaap:StatementBusinessSegmentsAxis"
+    facts = [
+        seg_fact(_REV, 1000, 2024, {}),
+        seg_fact(_REV, 600, 2024, {seg_axis: "aapl:RetailMember"}),
+        seg_fact(_REV, 400, 2024, {seg_axis: "aapl:WholesaleMember"}),
+    ]
+    out = seg.build_disaggregation(facts, [2024], _REVENUE_TAGS)
+    assert KNOWN_AXES[seg_axis] == "segment"
+    assert out["segment"]["aapl:RetailMember"][2024] == 600
+    assert out["segment"]["aapl:WholesaleMember"][2024] == 400
+    customs = [d for t, d in out["flags"]
+               if t == "REVIEW" and d.startswith("custom-tag")]
+    assert any("aapl:RetailMember" in d for d in customs), out["flags"]
+    assert any("aapl:WholesaleMember" in d for d in customs), out["flags"]
+
+
+def test_segments_reconcile_fields_within_tolerance():
+    """reconcile 에 computed_sum/reported_total/diff 병기. 허용오차 내면 플래그 없음."""
+    prod = "srt:ProductOrServiceAxis"
+    facts = [
+        seg_fact("us-gaap:Revenues", 1000, 2024, {}),
+        seg_fact("us-gaap:Revenues", 600, 2024, {prod: "us-gaap:ProductMember"}),
+        seg_fact("us-gaap:Revenues", 410, 2024, {prod: "us-gaap:ServiceMember"}),
+    ]
+    out = seg.build_disaggregation(facts, [2024], _REVENUE_TAGS)
+    rec = [r for r in out["reconcile"]
+           if r["group"] == "product" and r["year"] == 2024]
+    assert len(rec) == 1, out["reconcile"]
+    assert rec[0]["computed_sum"] == 1010
+    assert rec[0]["reported_total"] == 1000
+    assert rec[0]["diff"] == 10                      # 합 1010 vs 총계 1000
+    # 1% < 2% 허용오차 → does-not-reconcile 뜨지 않음(거짓양성 방지).
+    assert not any(d.startswith("does-not-reconcile") for _t, d in out["flags"])
+
+
+def test_segments_reconcile_adjustment_member_suppresses_flag():
+    """조정 멤버(Corporate/Eliminations 등)가 있으면 합≠총계라도 플래그 안 뜬다."""
+    seg_axis = "us-gaap:StatementBusinessSegmentsAxis"
+    facts = [
+        seg_fact("us-gaap:Revenues", 1000, 2024, {}),
+        seg_fact("us-gaap:Revenues", 700, 2024,
+                 {seg_axis: "us-gaap:ProductMember"}),
+        seg_fact("us-gaap:Revenues", 500, 2024,
+                 {seg_axis: "us-gaap:CorporateNonSegmentMember"}),
+    ]
+    out = seg.build_disaggregation(facts, [2024], _REVENUE_TAGS)
+    # 합 1200 vs 총계 1000 (20% 차이)지만 조정 멤버 존재 → does-not-reconcile 없음.
+    assert not any(d.startswith("does-not-reconcile") for _t, d in out["flags"])
+    rec = [r for r in out["reconcile"]
+           if r["group"] == "segment" and r["year"] == 2024]
+    assert rec and rec[0]["computed_sum"] == 1200 and rec[0]["diff"] == 200
+
+
+def test_segments_reconcile_flag_when_unbalanced_no_adjustment():
+    """조정 멤버 부재 + |diff|/total > 허용오차일 때만 does-not-reconcile."""
+    geo = "srt:StatementGeographicalAxis"
+    facts = [
+        seg_fact("us-gaap:Revenues", 1000, 2024, {}),
+        seg_fact("us-gaap:Revenues", 500, 2024, {geo: "country:US"}),
+        seg_fact("us-gaap:Revenues", 300, 2024, {geo: "country:CN"}),
+    ]
+    out = seg.build_disaggregation(facts, [2024], _REVENUE_TAGS)
+    # 합 800 vs 총계 1000 (20% 차이), 조정 멤버 없음 → REVIEW does-not-reconcile.
+    assert any(t == "REVIEW" and d.startswith("does-not-reconcile")
+               for t, d in out["flags"]), out["flags"]
 
 
 # ---- 독립 실행 러너 (pytest 없이도 동작) -------------------------------

@@ -188,3 +188,30 @@ STATEMENTS = [
 
 def line_fmt(line: dict) -> str:
     return line.get("fmt", MONEY)
+
+
+# ---- 차원(부문/지역/제품) 분해 매핑 ----------------------------------
+# segments.py 가 inline-XBRL 컨텍스트의 차원(축/멤버)을 표준 그룹으로 묶을 때
+# 쓰는 매핑. 축 문자열은 여기에만 둔다(다른 모듈에 하드코딩 금지 — 표준화 매핑은
+# 단일 출처). 분해 대상 개념(우선 매출)의 후보 태그는 위 STATEMENTS 의 revenue
+# 항목과 공유한다(segments 호출부가 그 tags 를 넘긴다).
+KNOWN_AXES = {
+    "us-gaap:StatementBusinessSegmentsAxis": "segment",
+    "srt:StatementGeographicalAxis": "geography",
+    "srt:ProductOrServiceAxis": "product",
+}
+
+# 표준 택소노미 네임스페이스(회사 고유가 아님). 여기 없는 prefix 의 멤버/개념은
+# 회사 고유로 보고 검토(custom-tag)로 보낸다. 회사 고유 KPI 는 표준 택소노미에
+# 없어 자동 표준화가 불가능하기 때문이다(ADR-007).
+STANDARD_PREFIXES = frozenset({
+    "us-gaap", "srt", "dei", "country", "stpr", "exch", "currency", "naics", "sic",
+})
+
+# 정합성(reconcile)용 '조정/제거' 멤버 힌트(소문자 부분문자열). 사업부간 제거·
+# Corporate/Other·조정항목 때문에 '멤버 합 ≠ 총계'는 정상이다. 이런 멤버가 하나라도
+# 있으면 차이가 커도 does-not-reconcile 로 띄우지 않는다(거짓양성 방지).
+RECONCILING_MEMBER_HINTS = frozenset({
+    "corporate", "eliminat", "reconcil", "intersegment", "intercompany",
+    "other", "adjustment",
+})

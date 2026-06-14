@@ -21,7 +21,10 @@
     {
       "step": 2,
       "name": "segment-mapping",
-      "status": "pending"
+      "status": "completed",
+      "started_at": "2026-06-14T14:19:33+0900",
+      "completed_at": "2026-06-14T14:27:39+0900",
+      "summary": "sec_extract/segments.py 추가: build_disaggregation 으로 차원 fact 를 {group: {member: {year: value}}} 로 집계. canonical_map 에 KNOWN_AXES(segment/geography/product)·STANDARD_PREFIXES·RECONCILING_MEMBER_HINTS 추가(축 문자열 단일출처, segments 는 하드코딩 0). 미인식 축→REVIEW unknown-axis(그룹 미배정), 회사 고유 멤버/개념→REVIEW custom-tag(축 표준이면 그룹 보존). reconcile 에 멤버합 vs 무차원총계(computed_sum/reported_total/diff) 병기, '조정멤버 부재 + |diff|/total>2%'일 때만 does-not-reconcile(거짓양성 방지). 연도=기간 end, 비연간 기간 배제. 신규 6 테스트(합성·네트워크 없음) 추가, 26/26 통과."
     },
     {
       "step": 3,
