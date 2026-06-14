@@ -16,6 +16,7 @@ from sec_extract.canonical_map import STATEMENTS
 from sec_extract.excel import write_workbook
 from sec_extract import xlsx
 from sec_extract import submissions as sub
+from sec_extract import xbrl_instance as xi
 
 
 # ---- 합성 companyfacts 빌더 -------------------------------------------
@@ -278,6 +279,168 @@ def test_find_instance_url_non_inline_finds_xml_instance():
     ]}}})
     url = sub.find_instance_url(client, 320193, filing)
     assert url == base + "aapl-20200926.xml", url
+
+
+# ---- inline-xbrl-parser (phase 1-segments-kpi, step 1) ----------------
+# 합성 inline-XBRL(주.htm 형태). 차원 없는 fact 와 차원 있는 fact 가 섞여 있다.
+_INLINE_DOC = """<?xml version="1.0" encoding="UTF-8"?>
+<xhtml xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+       xmlns:xbrli="http://www.xbrl.org/2003/instance"
+       xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+       xmlns:us-gaap="http://fasb.org/us-gaap/2024"
+       xmlns:srt="http://fasb.org/srt/2024">
+  <xbrli:context id="c-total">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000320193</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <xbrli:context id="c-product">
+    <xbrli:entity><xbrli:identifier scheme="http://www.sec.gov/CIK">0000320193</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="srt:ProductOrServiceAxis">us-gaap:ProductMember</xbrldi:explicitMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-total" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">391,035</ix:nonFraction>
+  <ix:nonFraction name="us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+                  contextRef="c-product" unitRef="usd" decimals="-6" scale="6"
+                  format="ixt:num-dot-decimal">294,866</ix:nonFraction>
+</xhtml>"""
+
+
+def test_parse_instance_dims_and_period():
+    """축/멤버(dims)·기간(start/end) 추출 + 차원 없는/있는 fact 모두 반환."""
+    facts = xi.parse_instance(_INLINE_DOC)
+    assert len(facts) == 2, facts
+    by_ctx = {f["context_ref"]: f for f in facts}
+    total, prod = by_ctx["c-total"], by_ctx["c-product"]
+    # 차원 유무로 거르지 않는다 — 둘 다 보존.
+    assert total["dims"] == {}
+    assert prod["dims"] == {"srt:ProductOrServiceAxis": "us-gaap:ProductMember"}
+    # 기간(duration).
+    assert total["start"] == "2023-10-01" and total["end"] == "2024-09-28"
+    assert total["instant"] is None
+    # concept/unit/decimals 보존.
+    assert total["concept"] == ("us-gaap:"
+                                "RevenueFromContractWithCustomerExcludingAssessedTax")
+    assert total["unit"] == "usd"
+    assert total["decimals"] == "-6"
+    # scale 적용(배율), decimals 는 곱하지 않음.
+    assert total["value"] == 391035 * 10 ** 6
+    assert prod["value"] == 294866 * 10 ** 6
+
+
+def test_parse_instance_scale_sign_comma():
+    """콤마 서식 + scale=6 + sign=- → 올바른 음수 큰 값. decimals 는 배율 아님."""
+    doc = """<?xml version="1.0"?>
+<xbrl xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2024">
+  <xbrli:context id="c1"><xbrli:entity><xbrli:identifier scheme="s">x</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:instant>2024-09-28</xbrli:instant></xbrli:period></xbrli:context>
+  <ix:nonFraction name="us-gaap:NetIncomeLoss" contextRef="c1" unitRef="usd"
+      decimals="-6" scale="6" sign="-" format="ixt:num-dot-decimal">1,234,567</ix:nonFraction>
+</xbrl>"""
+    facts = xi.parse_instance(doc)
+    assert len(facts) == 1
+    f = facts[0]
+    assert f["value"] == -1234567 * 10 ** 6, f["value"]
+    assert f["instant"] == "2024-09-28"
+    assert f["start"] is None and f["end"] is None
+    assert f["decimals"] == "-6"          # 메타데이터일 뿐, 곱하지 않음
+    assert f["raw_text"] == "1,234,567"   # 원본 표시 텍스트 보존
+
+
+def test_parse_instance_comma_decimal_format():
+    """유럽식(num-comma-decimal): 점=천단위, 콤마=소수점 → 1.234,56 == 1234.56."""
+    doc = """<?xml version="1.0"?>
+<xbrl xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+      xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2024">
+  <xbrli:context id="c1"><xbrli:entity><xbrli:identifier scheme="s">x</xbrli:identifier></xbrli:entity>
+    <xbrli:period><xbrli:instant>2024-09-28</xbrli:instant></xbrli:period></xbrli:context>
+  <ix:nonFraction name="us-gaap:EarningsPerShareDiluted" contextRef="c1"
+      unitRef="usd-per-share" decimals="2" scale="0"
+      format="ixt:num-comma-decimal">1.234,56</ix:nonFraction>
+</xbrl>"""
+    f = xi.parse_instance(doc)[0]
+    assert f["value"] == 1234.56, f["value"]
+
+
+def test_parse_instance_plain_xml_instance():
+    """비-inline 별도 .xml 인스턴스의 plain fact 도 prefix 복원하여 보존(차원 포함)."""
+    doc = """<?xml version="1.0"?>
+<xbrl xmlns:xbrli="http://www.xbrl.org/2003/instance"
+      xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2020"
+      xmlns:srt="http://fasb.org/srt/2020">
+  <xbrli:context id="c-geo">
+    <xbrli:entity><xbrli:identifier scheme="s">x</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">country:US</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+    <xbrli:period><xbrli:startDate>2019-09-29</xbrli:startDate><xbrli:endDate>2020-09-26</xbrli:endDate></xbrli:period>
+  </xbrli:context>
+  <us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax contextRef="c-geo" unitRef="usd" decimals="-6">100000000000</us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax>
+</xbrl>"""
+    facts = xi.parse_instance(doc)
+    assert len(facts) == 1, facts
+    f = facts[0]
+    assert f["concept"] == ("us-gaap:"
+                            "RevenueFromContractWithCustomerExcludingAssessedTax")
+    assert f["value"] == 100000000000
+    assert f["dims"] == {"srt:StatementGeographicalAxis": "country:US"}
+    assert f["start"] == "2019-09-29" and f["end"] == "2020-09-26"
+
+
+def test_parse_instance_lenient_on_broken_xhtml():
+    """미정의 엔티티(&nbsp;)로 ET 가 깨져도 관대한 경로로 부분 결과를 낸다."""
+    doc = """<html xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"
+       xmlns:xbrli="http://www.xbrl.org/2003/instance"
+       xmlns:xbrldi="http://xbrl.org/2006/xbrldi">
+  <body>
+    <p>Revenue&nbsp;by&nbsp;geography</p>
+    <xbrli:context id="c1">
+      <xbrli:entity><xbrli:segment>
+        <xbrldi:explicitMember dimension="srt:StatementGeographicalAxis">srt:AmericasMember</xbrldi:explicitMember>
+      </xbrli:segment></xbrli:entity>
+      <xbrli:period><xbrli:startDate>2023-10-01</xbrli:startDate><xbrli:endDate>2024-09-28</xbrli:endDate></xbrli:period>
+    </xbrli:context>
+    <ix:nonFraction name="us-gaap:Revenues" contextRef="c1" unitRef="usd"
+        scale="6" sign="-" format="ixt:num-dot-decimal">12,345</ix:nonFraction>&nbsp;
+  </body>
+</html>"""
+    facts = xi.parse_instance(doc)
+    assert len(facts) == 1, facts
+    f = facts[0]
+    assert f["concept"] == "us-gaap:Revenues"
+    assert f["value"] == -12345 * 10 ** 6
+    assert f["dims"] == {"srt:StatementGeographicalAxis": "srt:AmericasMember"}
+    assert f["start"] == "2023-10-01" and f["end"] == "2024-09-28"
+
+
+class _FakeTextClient:
+    """SecClient.get_text 만 흉내내는 스텁 (네트워크 없음)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.requested = []
+
+    def get_text(self, url, refresh=False):
+        self.requested.append(url)
+        return self.text
+
+
+def test_parse_instance_url_uses_client_get_text():
+    """네트워크 경계: parse_instance_url 은 SecClient.get_text 경유로만 받는다."""
+    client = _FakeTextClient(_INLINE_DOC)
+    url = ("https://www.sec.gov/Archives/edgar/data/320193/"
+           "000032019324000123/aapl-20240928.htm")
+    facts = xi.parse_instance_url(client, url)
+    assert client.requested == [url]   # 직접 urllib 금지, SecClient 만
+    assert len(facts) == 2
 
 
 # ---- 독립 실행 러너 (pytest 없이도 동작) -------------------------------

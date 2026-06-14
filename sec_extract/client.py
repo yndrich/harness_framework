@@ -41,9 +41,9 @@ class SecClient:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- 캐시 ------------------------------------------------------------
-    def _cache_path(self, url: str) -> Path:
+    def _cache_path(self, url: str, ext: str = "json") -> Path:
         h = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
-        return self.cache_dir / f"{h}.json"
+        return self.cache_dir / f"{h}.{ext}"
 
     def get_json(self, url: str, refresh: bool = False):
         if self.use_cache and not refresh:
@@ -57,6 +57,22 @@ class SecClient:
                 json.dumps(data, ensure_ascii=False), encoding="utf-8"
             )
         return data
+
+    def get_text(self, url: str, refresh: bool = False) -> str:
+        """원문 텍스트(XBRL 인스턴스 등 비-JSON) 응답을 받는다.
+
+        get_json 과 동일한 UA·레이트리밋·재시도·캐시 정책을 따른다. XBRL 인스턴스
+        문서(.htm/.xml)는 JSON 이 아니므로 별도 텍스트 취득 경로가 필요하다.
+        캐시는 .txt 확장자로 분리해 JSON 캐시와 충돌하지 않는다.
+        """
+        if self.use_cache and not refresh:
+            p = self._cache_path(url, ext="txt")
+            if p.exists():
+                return p.read_text(encoding="utf-8")
+        raw = self._fetch(url)
+        if self.use_cache:
+            self._cache_path(url, ext="txt").write_text(raw, encoding="utf-8")
+        return raw
 
     # ---- 저수준 요청 -----------------------------------------------------
     def _throttle(self) -> None:
