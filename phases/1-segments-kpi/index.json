@@ -1,0 +1,35 @@
+{
+  "project": "sec_extract",
+  "phase": "1-segments-kpi",
+  "steps": [
+    {
+      "step": 0,
+      "name": "submissions-locator",
+      "status": "completed",
+      "started_at": "2026-06-14T14:02:57+0900",
+      "completed_at": "2026-06-14T14:02:57+0900",
+      "summary": "sec_extract/submissions.py 추가: 10-K/10-K/A 추출(report_date dedup·내림차순 상위 n_years)·Archives index.json·실제 XBRL 인스턴스 URL 해석(inline=주.htm / 비-inline=별도.xml). 모든 HTTP 는 SecClient 경유, stdlib only. test_sec_extract.py 에 신규 6 케이스(합성·네트워크 없음) 추가, 14/14 통과."
+    },
+    {
+      "step": 1,
+      "name": "inline-xbrl-parser",
+      "status": "pending"
+    },
+    {
+      "step": 2,
+      "name": "segment-mapping",
+      "status": "pending"
+    },
+    {
+      "step": 3,
+      "name": "excel-segments",
+      "status": "pending"
+    },
+    {
+      "step": 4,
+      "name": "cli-integration",
+      "status": "pending"
+    }
+  ],
+  "created_at": "2026-06-14T14:02:57+0900"
+}
