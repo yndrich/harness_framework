@@ -7,3 +7,9 @@ tsconfig.tsbuildinfo
 # phase execution outputs
 phases/**/phase*-output.json
 phases/**/step*-output.json
+
+# sec_extract
+.sec_cache/
+*.xlsx
+__pycache__/
+*.pyc

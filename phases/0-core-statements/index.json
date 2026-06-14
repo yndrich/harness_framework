@@ -1,0 +1,23 @@
+{
+  "project": "sec_extract",
+  "phase": "0-core-statements",
+  "note": "이 phase 는 하네스 정식화 이전에 직접 구현되어 완료됨. 기록 목적의 회고 인덱스.",
+  "steps": [
+    { "step": 0, "name": "scaffold-xlsx-writer", "status": "completed",
+      "summary": "sec_extract 패키지 + 의존성 없는 XLSX 작성기(xlsx.py: 셀/스타일/병합/틀고정)" },
+    { "step": 1, "name": "http-client", "status": "completed",
+      "summary": "client.py SecClient — User-Agent, 10req/s 제한, 재시도, URL 디스크 캐시" },
+    { "step": 2, "name": "resolve-and-facts", "status": "completed",
+      "summary": "resolve.py(티커→10자리 CIK), facts.py(companyfacts API 래퍼)" },
+    { "step": 3, "name": "canonical-map", "status": "completed",
+      "summary": "canonical_map.py 표준화 레이어 — 표준항목→후보 us-gaap 태그 우선순위" },
+    { "step": 4, "name": "normalize", "status": "completed",
+      "summary": "normalize.py — 연도별 태그 해석, 최신제출본 채택(재작성), AMBIGUOUS/RESTATED/GAP 플래그" },
+    { "step": 5, "name": "excel-export", "status": "completed",
+      "summary": "excel.py — 제표 3시트 + Comparison + Review + Provenance, 플래그 색상 하이라이트" },
+    { "step": 6, "name": "cli", "status": "completed",
+      "summary": "cli.py + __main__.py — 다기업 인자, --years/--output/--refresh 등" },
+    { "step": 7, "name": "tests-and-docs", "status": "completed",
+      "summary": "tests/test_sec_extract.py(네트워크 불필요 8케이스), docs/SEC_EXTRACT.md 사용설명서" }
+  ]
+}

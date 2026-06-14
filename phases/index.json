@@ -1,0 +1,6 @@
+{
+  "phases": [
+    { "dir": "0-core-statements", "status": "completed" },
+    { "dir": "1-segments-kpi", "status": "pending" }
+  ]
+}
