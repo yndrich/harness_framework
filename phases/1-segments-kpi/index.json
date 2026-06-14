@@ -43,5 +43,6 @@
       "summary": "cli.py 결선: 옵트인 --segments 플래그 추가(기본 꺼짐). 켜지면 기업마다 submissions.list_annual_filings→find_instance_url→xbrl_instance.parse_instance_url 로 차원 fact 수집 후 segments.build_disaggregation(facts, years, revenue_tags) 결과를 CompanyResult.segments 에 실어 excel 이 분해 시트를 그리게 한다. 연도 라벨은 normalize 가 만든 동일 years(기간 end 기준) 를 그대로 넘겨 제표 시트와 같은 열에 정렬. revenue 후보 태그는 canonical_map STATEMENTS 에서 파생(_revenue_tags, 하드코딩 0). 모든 네트워크는 주입된 SecClient 공유 경유, 새 클라이언트 미생성. 공시/기업 단위 파싱 실패는 그 부분만 건너뛰고 빈 dict 반환(부분 결과·핵심 경로 회귀 금지). --segments 꺼짐이면 기존 동작·출력·네트워크 100% 동일. main(argv, client=None) DI seam 추가로 오프라인 통합 테스트 2건(fake client: 합성 submissions+인스턴스 → 분해 시트/값/REVIEW/출처 검증, 꺼짐 회귀) 추가, 29/29 통과."
     }
   ],
-  "created_at": "2026-06-14T14:02:57+0900"
+  "created_at": "2026-06-14T14:02:57+0900",
+  "completed_at": "2026-06-14T14:47:43+0900"
 }

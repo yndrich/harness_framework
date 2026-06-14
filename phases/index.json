@@ -1,6 +1,13 @@
 {
   "phases": [
-    { "dir": "0-core-statements", "status": "completed" },
-    { "dir": "1-segments-kpi", "status": "completed" }
+    {
+      "dir": "0-core-statements",
+      "status": "completed"
+    },
+    {
+      "dir": "1-segments-kpi",
+      "status": "completed",
+      "completed_at": "2026-06-14T14:47:43+0900"
+    }
   ]
 }
