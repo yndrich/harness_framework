@@ -15,7 +15,7 @@
       "name": "inline-xbrl-parser",
       "status": "completed",
       "started_at": "2026-06-14T14:09:02+0900",
-      "completed_at": "2026-06-14T14:18:52+0900",
+      "completed_at": "2026-06-14T14:19:32+0900",
       "summary": "sec_extract/xbrl_instance.py 추가: XBRL 인스턴스에서 차원(축/멤버) 포함 숫자 fact 추출. inline ix:nonFraction(scale·sign·콤마/유럽식 ixt 정규화, decimals 는 미배율) + 비-inline 별도 .xml plain fact(prefix 복원) 모두 처리. 차원 없는/있는 fact 모두 보존, 회사 고유 네임스페이스 유지. ET 파싱 실패 시 정규식 폴백. 텍스트 취득용 SecClient.get_text 추가(.txt 캐시). 신규 6 테스트(합성·네트워크 없음) 추가, 20/20 통과."
     },
     {
