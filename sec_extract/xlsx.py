@@ -134,6 +134,8 @@ class Sheet:
         self._merges: list[str] = []
         self._col_width: dict[int, float] = {}
         self._freeze: tuple | None = None
+        self._autofilter: str | None = None
+        self._color_scales: list[str] = []     # sqref 목록(각각 3색 색조)
         self._max_row = 0
         self._max_col = 0
 
@@ -154,6 +156,14 @@ class Sheet:
     def freeze(self, row, col):
         """(row, col) 부터 스크롤 영역. 그 위/왼쪽이 고정된다."""
         self._freeze = (row, col)
+
+    def auto_filter(self, r1, c1, r2, c2):
+        """헤더행에 자동필터를 건다 (정렬·필터 드롭다운)."""
+        self._autofilter = f"{cell_ref(r1, c1)}:{cell_ref(r2, c2)}"
+
+    def color_scale(self, r1, c1, r2, c2):
+        """범위에 3색 색조(빨강-노랑-초록) 조건부서식. 행 단위로 호출 권장."""
+        self._color_scales.append(f"{cell_ref(r1, c1)}:{cell_ref(r2, c2)}")
 
     def _xml(self) -> str:
         out = [
@@ -191,10 +201,25 @@ class Sheet:
                 out.append(self._cell_xml(ref, value, xf))
             out.append("</row>")
         out.append("</sheetData>")
-        # mergeCells (sheetData 뒤)
+        # 요소 순서(CT_Worksheet 스키마): sheetData → autoFilter → mergeCells →
+        # conditionalFormatting. 순서가 틀리면 Excel 이 복구 경고를 띄운다.
+        if self._autofilter:
+            out.append(f'<autoFilter ref="{self._autofilter}"/>')
         if self._merges:
             merges = "".join(f'<mergeCell ref="{m}"/>' for m in self._merges)
             out.append(f'<mergeCells count="{len(self._merges)}">{merges}</mergeCells>')
+        # 3색 색조(빨강-노랑-초록). priority 는 시트 내 유일해야 한다.
+        for i, sqref in enumerate(self._color_scales, start=1):
+            out.append(
+                f'<conditionalFormatting sqref="{sqref}">'
+                f'<cfRule type="colorScale" priority="{i}">'
+                '<colorScale>'
+                '<cfvo type="min"/><cfvo type="percentile" val="50"/>'
+                '<cfvo type="max"/>'
+                '<color rgb="FFF8696B"/><color rgb="FFFFEB84"/>'
+                '<color rgb="FF63BE7B"/>'
+                '</colorScale></cfRule></conditionalFormatting>'
+            )
         out.append("</worksheet>")
         return "".join(out)
 

@@ -4,6 +4,7 @@
     python -m sec_extract AAPL --years 5 -o apple.xlsx
     python -m sec_extract AAPL MSFT GOOGL --years 5 -o compare.xlsx
     python -m sec_extract AAPL --segments -o apple.xlsx   # 부문/지역/제품 분해 포함
+    python -m sec_extract NVDA --raw-model --period 2025Q1 -o nvda_q.xlsx  # 특정 분기만
 """
 
 from __future__ import annotations
@@ -19,6 +20,9 @@ from . import normalize as nz
 from . import submissions as sub
 from . import xbrl_instance as xi
 from . import segments as seg
+from . import segment_detail as sd
+from . import quarterly as qt
+from .raw_model import write_raw_model_workbook, build_rows
 from .excel import write_workbook
 
 
@@ -88,6 +92,64 @@ def build_company(client, ticker, n_years, refresh, with_segments=False):
     return result, years, n_flags
 
 
+def build_raw_company(client, ticker, n_quarters, refresh, with_segments=False,
+                      period_specs=None):
+    """--raw-model 경로: 분기 tidy 행 생성 (+선택적 as-reported 매출 분해).
+
+    period_specs(예: ['2025Q1', '2024Q1:2024Q4'])가 주어지면 그 분기만 고른다
+    (--quarters 의 '최근 N개' 슬라이싱 무시). 달력에 없는 분기는 select_periods
+    가 ValueError 로 표면화한다.
+    """
+    info = resolve_ticker(client, ticker, refresh=refresh)
+    cf = CompanyFacts.fetch(client, info["cik10"], refresh=refresh)
+    calendar = qt.fiscal_calendar(cf, STATEMENTS)
+    available = sorted(calendar.keys())
+    if period_specs:
+        periods = qt.select_periods(available, period_specs)
+    else:
+        periods = available[-n_quarters:] if n_quarters else available
+    rows = build_rows(cf, STATEMENTS, periods, calendar=calendar)
+    n_flags = sum(len(r.get("flags", [])) for r in rows)
+    seg_detail = None
+    if with_segments:
+        seg_detail = _build_segment_detail(
+            client, info["ticker"], info["cik10"], calendar, periods, n_quarters)
+    return info["ticker"], rows, periods, n_flags, seg_detail
+
+
+def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters):
+    """10-K+10-Q inline-XBRL 을 파싱해 as-reported 분기/연간 매출 분해를 만든다.
+
+    부분 결과 원칙: 한 공시 파싱이 실패해도 그 부분만 건너뛴다. 전체 실패면 None.
+    """
+    try:
+        filings = sub.list_periodic_filings(client, cik10, n_annual=6,
+                                            n_quarterly=(n_quarters or 16) + 4)
+    except Exception as e:  # noqa: BLE001 - 분해 실패가 핵심 경로를 죽이지 않게
+        print(f"[skip] {ticker} segment-detail: submissions 조회 실패: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return None
+    cik = int(cik10)
+    facts = []
+    for filing in filings:
+        try:
+            url = sub.find_instance_url(client, cik, filing)
+            for f in xi.parse_instance_url(client, url):
+                f["accn"] = filing.get("accn")
+                f["filed"] = filing.get("filing_date")
+                f["form"] = filing.get("form")
+                facts.append(f)
+        except Exception as e:  # noqa: BLE001 - 공시 단위 부분 실패는 건너뛴다
+            print(f"[skip] {ticker} {filing.get('accn')}: 인스턴스 파싱 실패: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            continue
+    if not facts:
+        return None
+    annual_years = sorted({fy for fy, _ in periods})
+    return sd.build_as_reported(facts, _revenue_tags(STATEMENTS), calendar,
+                                periods, annual_years)
+
+
 def main(argv=None, client=None) -> int:
     p = argparse.ArgumentParser(
         prog="sec_extract",
@@ -107,7 +169,20 @@ def main(argv=None, client=None) -> int:
     p.add_argument("--segments", action="store_true",
                    help="부문/지역/제품 매출 분해 시트 추가 (공시별 inline-XBRL 을 "
                         "파싱하므로 느리다; 기본 꺼짐)")
+    p.add_argument("--raw-model", action="store_true",
+                   help="분기 tidy Raw Data 출력 (사용자 모델 스키마 + Canonical Key)")
+    p.add_argument("--quarters", type=int, default=16,
+                   help="--raw-model 시 가져올 최근 분기 수 (기본 16)")
+    p.add_argument("--period", nargs="+", metavar="YYYYQn", default=None,
+                   help="특정 분기만 추출: 단일 2025Q1, 여러 개 2025Q1 2024Q3, "
+                        "범위 2024Q1:2025Q1. --raw-model 필요; 지정 시 --quarters 무시")
     args = p.parse_args(argv)
+
+    # --period 는 분기 출력(--raw-model)에만 의미가 있다(연간 경로는 회계연도 단위).
+    if args.period and not args.raw_model:
+        print("[error] --period 는 --raw-model 과 함께 써야 합니다 "
+              "(분기 선택은 분기 출력에만 적용됩니다).", file=sys.stderr)
+        return 2
 
     # client 주입 시(테스트) 그대로 공유한다 — 새 SecClient 를 만들지 않는다.
     if client is None:
@@ -116,6 +191,44 @@ def main(argv=None, client=None) -> int:
         if args.cache_dir:
             client_kwargs["cache_dir"] = args.cache_dir
         client = SecClient(**client_kwargs)
+
+    # --raw-model: 분기 tidy 출력 (사용자 모델 스키마)
+    if args.raw_model:
+        raw = []
+        any_seg = False
+        for t in args.tickers:
+            try:
+                ticker, rows, periods, n_flags, seg_detail = build_raw_company(
+                    client, t, args.quarters, args.refresh,
+                    with_segments=args.segments, period_specs=args.period)
+            except KeyError as e:
+                print(f"[skip] {e}", file=sys.stderr)
+                continue
+            except ValueError as e:   # --period 형식/범위 오류 등은 깔끔히 안내
+                print(f"[error] {t}: {e}", file=sys.stderr)
+                continue
+            except Exception as e:  # noqa: BLE001
+                print(f"[error] {t}: {type(e).__name__}: {e}", file=sys.stderr)
+                continue
+            raw.append((ticker, rows, periods, seg_detail))
+            span = (f"{periods[0][0]}Q{periods[0][1]}–{periods[-1][0]}Q{periods[-1][1]}"
+                    if periods else "no quarterly data")
+            n_rows = sum(1 for r in rows if r.get("val") is not None)
+            seg_note = ""
+            if seg_detail:
+                any_seg = True
+                seg_note = (f" | 분해 {len(seg_detail['rows'])}행 "
+                            f"(변경 {len(seg_detail['changes'])})")
+            print(f"  {ticker}: {n_rows} rows | {len(periods)} quarters "
+                  f"({span}) | review flags: {n_flags}{seg_note}")
+        if not raw:
+            print("처리된 기업이 없습니다.", file=sys.stderr)
+            return 1
+        write_raw_model_workbook(raw, args.output)
+        seg_sheets = (" + Segment Detail/Reconcile/Changes" if any_seg else "")
+        print(f"\n작성 완료(Raw Model): {args.output}  "
+              f"(시트: Raw Data + Meta Data + Event Log + Review{seg_sheets})")
+        return 0
 
     companies = []
     for t in args.tickers:

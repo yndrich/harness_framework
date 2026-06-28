@@ -23,20 +23,24 @@ ARCHIVES_BASE = "https://www.sec.gov/Archives/edgar/data/{cik}/{accn_nodash}/"
 
 # 추릴 연차 공시 form (정정본 10-K/A 포함).
 _ANNUAL_FORMS = ("10-K", "10-K/A")
+# 분기 공시 form (정정본 10-Q/A 포함).
+_QUARTERLY_FORMS = ("10-Q", "10-Q/A")
+# 인스턴스 본문(.htm) 타입 매칭에 쓰는 전체 정기공시 form 집합.
+_DOC_FORMS = _ANNUAL_FORMS + _QUARTERLY_FORMS
 
 # 비-inline 공시 폴더에서 인스턴스(.xml)와 구분해야 하는 링크베이스 접미사.
 _LINKBASE_SUFFIXES = ("_cal.xml", "_def.xml", "_lab.xml", "_pre.xml", "_ref.xml")
 
 
-def select_annual_filings(submissions: dict, n_years: int = 5) -> list[dict]:
-    """(순수 함수, 네트워크 없음) 파싱된 submissions JSON 에서 10-K 공시를 추린다.
+def select_filings(submissions: dict, forms, n: int) -> list[dict]:
+    """(순수 함수, 네트워크 없음) submissions JSON 에서 주어진 form 공시를 추린다.
 
     filings.recent 의 병렬 배열(accessionNumber/form/filingDate/reportDate/
     primaryDocument/isXBRL/isInlineXBRL)을 dict 행으로 zip 한다.
-    - form 이 '10-K' 또는 '10-K/A' 인 것만.
-    - 같은 report_date 는 최신 filing_date 1건으로 dedup(정정본 10-K/A 가 원본보다
-      늦게 제출되므로 자연히 정정본이 채택된다).
-    - report_date 내림차순 상위 n_years.
+    - form 이 `forms` 에 속한 것만.
+    - 같은 report_date 는 최신 filing_date 1건으로 dedup(정정본이 원본보다 늦게
+      제출되므로 자연히 정정본이 채택된다).
+    - report_date 내림차순 상위 n.
 
     각 행: {accn, accn_nodash, form, filing_date, report_date,
             primary_document, is_inline_xbrl, is_xbrl}.
@@ -47,25 +51,26 @@ def select_annual_filings(submissions: dict, n_years: int = 5) -> list[dict]:
         return recent.get(name, []) or []
 
     accns = col("accessionNumber")
-    forms = col("form")
+    forms_col = col("form")
     filing_dates = col("filingDate")
     report_dates = col("reportDate")
     primary_docs = col("primaryDocument")
     is_xbrl = col("isXBRL")
     is_inline = col("isInlineXBRL")
+    formset = set(forms)
 
     def at(arr: list, i: int, default=None):
         return arr[i] if i < len(arr) else default
 
     rows: list[dict] = []
     for i, accn in enumerate(accns):
-        if at(forms, i) not in _ANNUAL_FORMS:
+        if at(forms_col, i) not in formset:
             continue
         accn = accn or ""
         rows.append({
             "accn": accn,
             "accn_nodash": accn.replace("-", ""),
-            "form": at(forms, i),
+            "form": at(forms_col, i),
             "filing_date": at(filing_dates, i, "") or "",
             "report_date": at(report_dates, i, "") or "",
             "primary_document": at(primary_docs, i, "") or "",
@@ -82,13 +87,31 @@ def select_annual_filings(submissions: dict, n_years: int = 5) -> list[dict]:
 
     deduped = sorted(by_report.values(),
                      key=lambda r: r["report_date"], reverse=True)
-    return deduped[:n_years]
+    return deduped[:n]
+
+
+def select_annual_filings(submissions: dict, n_years: int = 5) -> list[dict]:
+    """10-K(정정본 포함) 공시만 추린다 — select_filings 의 연차 특화."""
+    return select_filings(submissions, _ANNUAL_FORMS, n_years)
 
 
 def list_annual_filings(client, cik10: str, n_years: int = 5) -> list[dict]:
     """SecClient 로 submissions 를 받아 select_annual_filings 를 호출한다."""
     url = SUBMISSIONS_URL.format(cik10=cik10)
     return select_annual_filings(client.get_json(url), n_years)
+
+
+def list_periodic_filings(client, cik10: str, n_annual: int = 6,
+                          n_quarterly: int = 20) -> list[dict]:
+    """10-K 와 10-Q 를 함께 받아 합친 목록(분기 분해용).
+
+    부문/지역 분기 분해는 10-Q 인스턴스에서 오고, Q4 차분·연간(FY) 행은 10-K 가
+    필요하다. report_date 내림차순으로 정렬해 돌려준다."""
+    subs = client.get_json(SUBMISSIONS_URL.format(cik10=cik10))
+    annual = select_filings(subs, _ANNUAL_FORMS, n_annual)
+    quarterly = select_filings(subs, _QUARTERLY_FORMS, n_quarterly)
+    merged = annual + quarterly
+    return sorted(merged, key=lambda r: r["report_date"], reverse=True)
 
 
 def filing_index_url(cik: int, accn_nodash: str) -> str:
@@ -124,7 +147,7 @@ def find_instance_url(client, cik: int, filing: dict) -> str:
         # index 에 primary 가 없으면 폴더의 10-K 본문 .htm 으로 폴백.
         for it in items:
             name = it.get("name", "")
-            if name.endswith(".htm") and (it.get("type") or "") in _ANNUAL_FORMS:
+            if name.endswith(".htm") and (it.get("type") or "") in _DOC_FORMS:
                 return base + name
         if primary:
             return base + primary

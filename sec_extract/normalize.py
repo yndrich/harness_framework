@@ -153,7 +153,18 @@ def normalize_company(facts_obj, statements, years: list) -> dict:
         skey = st["key"]
         lines = {}
         for line in st["lines"]:
-            cells = {}
+            cells = {y: None for y in years}
+            if line.get("face_only"):
+                # companyfacts 에 단일 fact 없는 face 라인 → 최신 연도에 REVIEW 플래그
+                if years:
+                    cells[max(years)] = {
+                        "val": None, "tag": None, "unit": None, "fact": None,
+                        "flags": [("REVIEW", line.get("note") or
+                                   "companyfacts 에 단일 fact 없음 — inline-XBRL 필요")],
+                        "alt_hits": [],
+                    }
+                lines[line["key"]] = cells
+                continue
             for y in years:
                 cells[y] = resolve_cell(
                     facts_obj, line["tags"], y, st["period_type"],

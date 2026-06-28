@@ -32,8 +32,11 @@ SEC EDGAR 10-K/10-Q 공시에서 표준화된 재무정보를 가져와 다년·
 
 ## 명령어
 ```bash
-python3 -m sec_extract AAPL --years 5 -o out.xlsx   # 실행 (단일 기업)
-python3 -m sec_extract AAPL MSFT NVDA -o cmp.xlsx    # 다기업 비교
+python3 -m sec_extract AAPL --years 5 -o out.xlsx    # 실행 (단일 기업)
+python3 -m sec_extract AAPL MSFT NVDA -o cmp.xlsx     # 다기업 비교
+python3 -m sec_extract NVDA --raw-model --quarters 16 -o q.xlsx    # 분기 tidy 출력
+python3 -m sec_extract NVDA --raw-model --period 2025Q1 -o q1.xlsx # 특정 분기만
 python3 tests/test_sec_extract.py                    # 테스트 (pytest 불필요)
+python3 tests/test_quarterly.py                      # 분기/raw_model/--period 테스트
 python3 scripts/execute.py <task-name>               # 하네스로 다음 phase 실행
 ```

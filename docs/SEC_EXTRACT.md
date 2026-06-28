@@ -12,6 +12,17 @@ python3 -m sec_extract AAPL --years 5 -o apple.xlsx
 
 # 여러 기업 비교
 python3 -m sec_extract AAPL MSFT NVDA --years 5 -o compare.xlsx
+
+# 분기 raw 데이터(사용자 모델용 tidy) — 최근 16분기
+python3 -m sec_extract NVDA --raw-model --quarters 16 -o nvda_q.xlsx
+
+# 특정 분기만 (단일 / 여러 개 / 범위) — 지정 시 --quarters 무시
+python3 -m sec_extract NVDA --raw-model --period 2025Q1 -o nvda_2025q1.xlsx
+python3 -m sec_extract NVDA --raw-model --period 2025Q1 2024Q3 -o nvda_picks.xlsx
+python3 -m sec_extract NVDA --raw-model --period 2024Q1:2025Q1 -o nvda_range.xlsx
+
+# 부문/지역/제품 매출 분해 시트 추가 (연간; --raw-model 과 함께면 분기 분해)
+python3 -m sec_extract NVDA --segments -o nvda.xlsx
 ```
 
 생성되는 시트:
@@ -30,6 +41,10 @@ python3 -m sec_extract AAPL MSFT NVDA --years 5 -o compare.xlsx
 | `--refresh` | 캐시 무시하고 새로 받기 |
 | `--no-cache` | 캐시 사용 안 함 |
 | `--cache-dir DIR` | 응답 캐시 위치 (기본 `.sec_cache/`) |
+| `--segments` | 부문/지역/제품 매출 분해 시트 추가 (공시별 inline-XBRL 파싱 — 느림) |
+| `--raw-model` | 분기 tidy Raw Data 출력 (사용자 모델 스키마 + Canonical Key) |
+| `--quarters N` | `--raw-model` 시 최근 N개 분기 (기본 16) |
+| `--period YYYYQn …` | `--raw-model` 시 특정 분기만: 단일 `2025Q1`, 여러 개 `2025Q1 2024Q3`, 범위 `2024Q1:2025Q1`. 지정 시 `--quarters` 무시. 달력에 없는 분기는 오류로 안내 |
 
 > SEC 정책상 모든 요청에 **연락처가 담긴 User-Agent** 가 필요하다(없으면 403).
 > 기본값에 이메일이 들어 있으나, 본인 연락처로 바꾸는 것을 권장한다.
@@ -73,24 +88,36 @@ sec_extract/
 ├── client.py         # HTTP: User-Agent, 10 req/s 제한, 재시도, 디스크 캐시
 ├── resolve.py        # 티커 → CIK (company_tickers.json)
 ├── facts.py          # companyfacts API 래퍼
-├── canonical_map.py  # ★ 표준화 레이어 (사람이 편집) — 표준항목→후보태그
+├── submissions.py    # EDGAR 공시(10-K/10-Q) 목록·인스턴스 URL 탐색
+├── xbrl_instance.py  # inline-XBRL 인스턴스 파서 (축/멤버 차원 복원)
+├── canonical_map.py  # ★ 표준화 레이어 (사람이 편집) — 표준항목→후보태그·축/멤버 별칭
 ├── normalize.py      # 연도별 태그 해석, 재작성 dedup, 검토 플래그
-├── excel.py          # 워크북 구성 (제표/Comparison/Review/Provenance)
+├── quarterly.py      # 이산 분기 추출(매출 기준 날짜 달력) + --period 분기 선택
+├── segments.py       # 연간 부문/지역/제품 분해 (표준 축 집계)
+├── segment_detail.py # as-reported 분기/연간 매출 분해 (멤버 verbatim + 변경 로그)
+├── excel.py          # 연간 워크북 (제표/Comparison/Review/Provenance)
+├── raw_model.py      # 분기 tidy Raw Data 워크북 (사용자 모델 스키마)
 ├── xlsx.py           # 의존성 없는 최소 XLSX 작성기
 └── cli.py            # 명령행 진입점
-tests/test_sec_extract.py   # 네트워크 불필요 단위 테스트
+tests/  test_sec_extract.py · test_quarterly.py · test_segment_detail.py  (네트워크 불필요)
 ```
 
-테스트: `python3 tests/test_sec_extract.py` (pytest 있으면 `pytest tests/`).
+테스트: 세 파일을 직접 실행한다(`python3 tests/test_sec_extract.py` 등), pytest 있으면 `pytest tests/`.
 
-## 다음 단계 (아직 미구현): 부문별/지역별 매출 · KPI
+## 부문별/지역별/제품별 매출 (구현됨: `--segments`, `--raw-model --segments`)
 
-companyfacts API 는 **차원(dimension)** 데이터를 담지 않는다. 즉 사업부문별/지역별
-매출, 비-GAAP KPI 같은 분해 데이터는 여기 없다. 이건 해당 공시의 **inline-XBRL
-인스턴스 문서**를 직접 파싱해야 한다(`<context>` 의 `xbrldi:explicitMember` 로
-축/멤버 복원). 또한 기업 고유 네임스페이스(예: `aapl:`)로 태깅된 KPI 는 표준
-택소노미에 없어 **본질적으로 자동 표준화가 불가능 → 전량 검토 큐**로 보낸다.
+companyfacts API 는 **차원(dimension)** 데이터를 담지 않는다(사업부문별/지역별 매출 등).
+그래서 해당 공시의 **inline-XBRL 인스턴스 문서**를 직접 파싱해 축/멤버를 복원한다
+(`<context>` 의 `xbrldi:explicitMember`). 기업 고유 네임스페이스(예: `nvda:`)로 태깅된
+멤버는 표준 택소노미에 없어 자동 표준화가 본질적으로 불가능하므로, **as-reported(보고된
+그대로) 캡처**한다:
 
-계획된 모듈: `segments.py` (submissions API 로 공시 폴더 탐색 → inline-XBRL 파싱 →
-알려진 축 `StatementBusinessSegmentsAxis`/`srt:StatementGeographicalAxis`/
-`srt:ProductOrServiceAxis` 매핑, 미인식 축·커스텀 태그는 Review 로).
+- `segments.py` — 연간 분해. 표준 축(`StatementBusinessSegmentsAxis`/
+  `srt:StatementGeographicalAxis`/`srt:ProductOrServiceAxis`)으로 집계, 미인식 축·커스텀
+  멤버는 Review 로. (`--segments` → 연간 워크북에 시트 추가)
+- `segment_detail.py` — 분기/연간 멤버별 매출을 QName 그대로 보존 + 별칭 레이어
+  (`canonical_map.AXIS_LABELS`/`MEMBER_ALIASES`) + 변경 로그(멤버 신규/중단/재작성) +
+  합계 대비 reconcile. (`--raw-model --segments` → 분기 분해 시트 추가)
+
+미구현(다음 단계): 비-GAAP KPI 표준화, 합성(composite) face 라인의 inline-XBRL 보강
+(현재는 `face_only` 라인으로 Review 표면화).

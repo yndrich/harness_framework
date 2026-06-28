@@ -63,6 +63,35 @@ def test_tag_change_over_years():
         assert cell["tag"] == exp_tag, (y, cell["tag"])
 
 
+def test_financial_company_fallback_tags():
+    """은행/거래소형 기업(COIN 등)이 쓰는 catch-all 태그를 표준 라인이 폴백으로
+    잡는다: 이자이익=InterestIncomeOperating, 운전자본 변동=OtherOperating자산/부채.
+    특정 태그가 없어 단일 후보 → AMBIGUOUS 없이 깔끔히 채택해야 한다."""
+    cf = make_facts({
+        "InterestIncomeOperating": _usd([dur(174, 2023, "a1", "2024-02-01")]),
+        "IncreaseDecreaseInOtherOperatingAssets":
+            _usd([dur(-28, 2023, "a1", "2024-02-01")]),
+        "IncreaseDecreaseInOtherOperatingLiabilities":
+            _usd([dur(109, 2023, "a1", "2024-02-01")]),
+    })
+
+    def line(skey, lkey):
+        st = next(s for s in STATEMENTS if s["key"] == skey)
+        return next(l for l in st["lines"] if l["key"] == lkey)
+
+    for skey, lkey, exp, tag in [
+        ("income_statement", "interest_income", 174, "InterestIncomeOperating"),
+        ("cash_flow", "chg_prepaid_other", -28,
+         "IncreaseDecreaseInOtherOperatingAssets"),
+        ("cash_flow", "chg_accrued_liabilities", 109,
+         "IncreaseDecreaseInOtherOperatingLiabilities"),
+    ]:
+        cell = nz.resolve_cell(cf, line(skey, lkey)["tags"], 2023, "duration")
+        assert cell and cell["val"] == exp, (lkey, cell)
+        assert cell["tag"] == tag, (lkey, cell["tag"])
+        assert not any(f[0] == "AMBIGUOUS" for f in cell["flags"]), cell["flags"]
+
+
 def test_restatement_flagged():
     """같은 2021 값을 두 공시가 다르게 보고 -> 최신 채택 + RESTATED 플래그."""
     cf = make_facts({"NetIncomeLoss": _usd([
@@ -158,6 +187,32 @@ def test_xlsx_cell_ref():
     assert xlsx.cell_ref(1, 1) == "A1"
     assert xlsx.cell_ref(3, 27) == "AA3"
     assert xlsx.cell_ref(10, 28) == "AB10"
+
+
+def test_xlsx_autofilter_and_colorscale_wellformed(tmp_path=None):
+    """자동필터·색조가 well-formed 이고 스키마 요소 순서(autoFilter→mergeCells→
+    conditionalFormatting)를 지킨다 — 순서 틀리면 Excel 이 복구 경고를 띄운다."""
+    import xml.etree.ElementTree as ET
+    wb = xlsx.Workbook()
+    sh = wb.add_sheet("P")
+    for c in range(1, 4):
+        sh.write(2, c, f"h{c}", bold=True)
+    sh.write(3, 1, "매출"); sh.write(3, 2, 100); sh.write(3, 3, 200)
+    sh.merge(1, 1, 1, 3)
+    sh.auto_filter(2, 1, 3, 3)
+    sh.color_scale(3, 2, 3, 3)
+    path = os.path.join(os.path.dirname(__file__), "_smoke_xlsx.xlsx")
+    wb.save(path)
+    z = zipfile.ZipFile(path)
+    sx = z.read("xl/worksheets/sheet1.xml").decode()
+    ET.fromstring(sx)                       # well-formed XML
+    i_data = sx.index("</sheetData>")
+    i_af = sx.index("<autoFilter")
+    i_mc = sx.index("<mergeCells")
+    i_cf = sx.index("<conditionalFormatting")
+    assert i_data < i_af < i_mc < i_cf, "스키마 요소 순서 위반"
+    assert "colorScale" in sx and 'type="colorScale"' in sx
+    os.remove(path)
 
 
 # ---- submissions-locator (phase 1-segments-kpi, step 0) ---------------
