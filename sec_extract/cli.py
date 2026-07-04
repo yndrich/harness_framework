@@ -21,6 +21,7 @@ from . import submissions as sub
 from . import xbrl_instance as xi
 from . import segments as seg
 from . import segment_detail as sd
+from . import statement_detail as std
 from . import labels as lb
 from . import quarterly as qt
 from .raw_model import write_raw_model_workbook, build_rows
@@ -93,15 +94,16 @@ def build_company(client, ticker, n_years, refresh, with_segments=False):
     return result, years, n_flags
 
 
-def _fetch_label_map(client, ticker, cik10, with_segments):
+def _fetch_label_map(client, ticker, cik10, need_periodic):
     """공시 label linkbase 에서 concept→표시라벨 맵을 받는다(best-effort).
 
-    Raw Data/Segment Detail 의 '항목(원본)' 열에 쓸 공시 원문 라벨. 편의 열이라
-    실패는 조용히 빈 맵으로 폴백한다(핵심 출력 불변). --segments 면 10-Q 멤버 라벨
-    까지 필요하므로 정기공시(10-K+10-Q)를, 아니면 최신 10-K 몇 건을 훑는다.
+    Raw Data/Segment Detail/As-Reported 의 '항목(원본)' 열에 쓸 공시 원문 라벨.
+    편의 열이라 실패는 조용히 빈 맵으로 폴백한다(핵심 출력 불변). 분해/전체제표를
+    쓰면 10-Q 멤버·커스텀 태그 라벨까지 필요하므로 정기공시(10-K+10-Q)를, 아니면
+    최신 10-K 몇 건을 훑는다.
     """
     try:
-        if with_segments:
+        if need_periodic:
             filings = sub.list_periodic_filings(client, cik10, n_annual=2,
                                                 n_quarterly=3)
         else:
@@ -114,12 +116,13 @@ def _fetch_label_map(client, ticker, cik10, with_segments):
 
 
 def build_raw_company(client, ticker, n_quarters, refresh, with_segments=False,
-                      period_specs=None):
-    """--raw-model 경로: 분기 tidy 행 생성 (+선택적 as-reported 매출 분해).
+                      period_specs=None, with_as_reported=False):
+    """--raw-model 경로: 분기 tidy 행 생성 (+선택적 as-reported 분해/전체 재무제표).
 
     period_specs(예: ['2025Q1', '2024Q1:2024Q4'])가 주어지면 그 분기만 고른다
     (--quarters 의 '최근 N개' 슬라이싱 무시). 달력에 없는 분기는 select_periods
-    가 ValueError 로 표면화한다.
+    가 ValueError 로 표면화한다. with_segments/with_as_reported 는 둘 다 공시별
+    inline-XBRL 을 쓰므로, 켜지면 fact 를 한 번만 받아 두 산출물에 공유한다.
     """
     info = resolve_ticker(client, ticker, refresh=refresh)
     cf = CompanyFacts.fetch(client, info["cik10"], refresh=refresh)
@@ -129,33 +132,40 @@ def build_raw_company(client, ticker, n_quarters, refresh, with_segments=False,
         periods = qt.select_periods(available, period_specs)
     else:
         periods = available[-n_quarters:] if n_quarters else available
-    label_map = _fetch_label_map(client, info["ticker"], info["cik10"],
-                                 with_segments)
+    need_inline = with_segments or with_as_reported
+    label_map = _fetch_label_map(client, info["ticker"], info["cik10"], need_inline)
     rows = build_rows(cf, STATEMENTS, periods, calendar=calendar,
                       label_map=label_map)
     n_flags = sum(len(r.get("flags", [])) for r in rows)
-    seg_detail = None
-    if with_segments:
-        seg_detail = _build_segment_detail(
-            client, info["ticker"], info["cik10"], calendar, periods, n_quarters,
-            label_map=label_map)
-    return info["ticker"], rows, periods, n_flags, seg_detail
+
+    seg_detail = stmt_detail = None
+    if need_inline:
+        facts = _fetch_instance_facts(client, info["ticker"], info["cik10"],
+                                      n_quarters)
+        annual_years = sorted({fy for fy, _ in periods})
+        if facts and with_segments:
+            seg_detail = sd.build_as_reported(
+                facts, _revenue_tags(STATEMENTS), calendar, periods,
+                annual_years, label_map=label_map)
+        if facts and with_as_reported:
+            stmt_detail = std.build_as_reported_statements(
+                facts, calendar, periods, annual_years, label_map=label_map)
+    return info["ticker"], rows, periods, n_flags, seg_detail, stmt_detail
 
 
-def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters,
-                          label_map=None):
-    """10-K+10-Q inline-XBRL 을 파싱해 as-reported 분기/연간 매출 분해를 만든다.
+def _fetch_instance_facts(client, ticker, cik10, n_quarters):
+    """정기공시(10-K+10-Q) inline-XBRL 을 파싱해 전체 fact 리스트를 만든다.
 
-    부분 결과 원칙: 한 공시 파싱이 실패해도 그 부분만 건너뛴다. 전체 실패면 None.
-    label_map: 멤버 표시라벨(원본 항목명) 맵 — build_as_reported 에 전달.
-    """
+    segment_detail(차원 있는 매출 분해)과 statement_detail(차원 없는 본표 전체)이
+    같은 fact 를 공유하도록 다운로드·파싱을 한 곳에서 한다(다운로드 1회). 각 fact 에
+    출처(accn/filed/form)를 부착한다. 부분 실패는 공시 단위로 건너뛴다."""
     try:
         filings = sub.list_periodic_filings(client, cik10, n_annual=6,
                                             n_quarterly=(n_quarters or 16) + 4)
-    except Exception as e:  # noqa: BLE001 - 분해 실패가 핵심 경로를 죽이지 않게
-        print(f"[skip] {ticker} segment-detail: submissions 조회 실패: "
+    except Exception as e:  # noqa: BLE001 - 취득 실패가 핵심 경로를 죽이지 않게
+        print(f"[skip] {ticker} inline-XBRL: submissions 조회 실패: "
               f"{type(e).__name__}: {e}", file=sys.stderr)
-        return None
+        return []
     cik = int(cik10)
     facts = []
     for filing in filings:
@@ -170,11 +180,7 @@ def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters,
             print(f"[skip] {ticker} {filing.get('accn')}: 인스턴스 파싱 실패: "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
             continue
-    if not facts:
-        return None
-    annual_years = sorted({fy for fy, _ in periods})
-    return sd.build_as_reported(facts, _revenue_tags(STATEMENTS), calendar,
-                                periods, annual_years, label_map=label_map)
+    return facts
 
 
 def main(argv=None, client=None) -> int:
@@ -196,6 +202,10 @@ def main(argv=None, client=None) -> int:
     p.add_argument("--segments", action="store_true",
                    help="부문/지역/제품 매출 분해 시트 추가 (공시별 inline-XBRL 을 "
                         "파싱하므로 느리다; 기본 꺼짐)")
+    p.add_argument("--as-reported", action="store_true",
+                   help="공시 원문 전체 재무제표(3대 제표) as-reported 시트 추가. "
+                        "canonical 표준 라인에 없는 항목·회사 커스텀 태그까지 보존. "
+                        "--raw-model 필요; inline-XBRL 파싱이라 느리다; 기본 꺼짐")
     p.add_argument("--raw-model", action="store_true",
                    help="분기 tidy Raw Data 출력 (사용자 모델 스키마 + Canonical Key)")
     p.add_argument("--quarters", type=int, default=16,
@@ -210,6 +220,11 @@ def main(argv=None, client=None) -> int:
         print("[error] --period 는 --raw-model 과 함께 써야 합니다 "
               "(분기 선택은 분기 출력에만 적용됩니다).", file=sys.stderr)
         return 2
+    # --as-reported 도 분기 tidy 워크북에만 시트를 붙인다(연간 경로엔 미적용).
+    if args.as_reported and not args.raw_model:
+        print("[error] --as-reported 는 --raw-model 과 함께 써야 합니다.",
+              file=sys.stderr)
+        return 2
 
     # client 주입 시(테스트) 그대로 공유한다 — 새 SecClient 를 만들지 않는다.
     if client is None:
@@ -223,11 +238,14 @@ def main(argv=None, client=None) -> int:
     if args.raw_model:
         raw = []
         any_seg = False
+        any_stmt = False
         for t in args.tickers:
             try:
-                ticker, rows, periods, n_flags, seg_detail = build_raw_company(
-                    client, t, args.quarters, args.refresh,
-                    with_segments=args.segments, period_specs=args.period)
+                ticker, rows, periods, n_flags, seg_detail, stmt_detail = \
+                    build_raw_company(
+                        client, t, args.quarters, args.refresh,
+                        with_segments=args.segments, period_specs=args.period,
+                        with_as_reported=args.as_reported)
             except KeyError as e:
                 print(f"[skip] {e}", file=sys.stderr)
                 continue
@@ -237,7 +255,7 @@ def main(argv=None, client=None) -> int:
             except Exception as e:  # noqa: BLE001
                 print(f"[error] {t}: {type(e).__name__}: {e}", file=sys.stderr)
                 continue
-            raw.append((ticker, rows, periods, seg_detail))
+            raw.append((ticker, rows, periods, seg_detail, stmt_detail))
             span = (f"{periods[0][0]}Q{periods[0][1]}–{periods[-1][0]}Q{periods[-1][1]}"
                     if periods else "no quarterly data")
             n_rows = sum(1 for r in rows if r.get("val") is not None)
@@ -246,15 +264,23 @@ def main(argv=None, client=None) -> int:
                 any_seg = True
                 seg_note = (f" | 분해 {len(seg_detail['rows'])}행 "
                             f"(변경 {len(seg_detail['changes'])})")
+            stmt_note = ""
+            if stmt_detail:
+                any_stmt = True
+                n_concepts = len({r["concept"] for r in stmt_detail["rows"]})
+                stmt_note = (f" | as-reported {len(stmt_detail['rows'])}행 "
+                             f"({n_concepts} 계정)")
             print(f"  {ticker}: {n_rows} rows | {len(periods)} quarters "
-                  f"({span}) | review flags: {n_flags}{seg_note}")
+                  f"({span}) | review flags: {n_flags}{seg_note}{stmt_note}")
         if not raw:
             print("처리된 기업이 없습니다.", file=sys.stderr)
             return 1
         write_raw_model_workbook(raw, args.output)
+        stmt_sheets = (" + As-Reported" if any_stmt else "")
         seg_sheets = (" + Segment Detail/Reconcile/Changes" if any_seg else "")
         print(f"\n작성 완료(Raw Model): {args.output}  "
-              f"(시트: Raw Data + Meta Data + Event Log + Review{seg_sheets})")
+              f"(시트: Raw Data + Meta Data + Event Log + Review"
+              f"{stmt_sheets}{seg_sheets})")
         return 0
 
     companies = []

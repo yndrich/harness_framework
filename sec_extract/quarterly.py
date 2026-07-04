@@ -387,3 +387,26 @@ def annual_from_facts(facts, calendar, fy):
     if hit is None:
         return None
     return {"val": hit["val"], "method": "annual", "fact": hit}
+
+
+def instant_from_facts(facts, calendar, fy, q):
+    """플랫 fact 리스트에서 (fy,q) 분기말 시점 잔액(재무상태표). 없으면 None.
+
+    q ∈ {1,2,3,4} → 그 분기말 잔액, q=='FY' → 회계연도 말 잔액.
+    discrete_from_facts/annual_from_facts 의 instant 대응 버전(statement_detail 용)."""
+    if q == "FY":
+        win = calendar.get((fy, 4)) or calendar.get((fy, 3)) \
+            or calendar.get((fy, 2)) or calendar.get((fy, 1))
+        if win is None:
+            return None
+        q4 = calendar.get((fy, 4))
+        q_end = q4["end"] if q4 else win["end"]
+    else:
+        win = calendar.get((fy, q))
+        if win is None:
+            return None
+        q_end = win["end"]
+    val, method, src = _instant_by_dates(facts, q_end)
+    if val is None:
+        return None
+    return {"val": val, "method": method, "fact": src}

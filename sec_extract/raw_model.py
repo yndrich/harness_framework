@@ -32,6 +32,10 @@ NOTE_FILL = "FCE4D6"
 # 값 스케일 안내(모든 값 시트 상단에 표기 — million/thousand 혼동 방지).
 UNIT_NOTE = "값 단위: 백만 USD ($M)  ·  주식수=백만 주  ·  주당값(EPS)=달러/주"
 UNIT_NOTE_SEG = "값 단위: 백만 USD ($M)"
+UNIT_NOTE_ASREP = ("값 단위: 화폐=백만($M) · 주식수=백만 주 · 주당·비율=원값   |   "
+                   "구분 노랑칸=canonical 밖 추정 분류")
+# As-Reported 시트 구분(구분) 정렬 순서.
+_STMT_ORDER = {"income_statement": 0, "balance_sheet": 1, "cash_flow": 2, "other": 3}
 
 
 def _scale(val, unit):
@@ -39,6 +43,17 @@ def _scale(val, unit):
     if unit in (None, "USD", "shares"):
         return val / 1_000_000
     return val
+
+
+def _scale_asrep(val, unit):
+    """as-reported 값 스케일 — inline-XBRL unitRef 문자열(예: usd/shares/usdPerShare)
+    기준. 달러·주식수는 백만 단위, per-share·비율(pure)·단위불명은 원값 유지."""
+    u = (unit or "").lower()
+    if "usd" in u and "share" not in u:
+        return val / 1_000_000          # 달러 → 백만 USD
+    if "share" in u and "usd" not in u:
+        return val / 1_000_000          # 주식수 → 백만 주
+    return val                          # per-share·pure·비율·불명 → 원값
 
 
 def _period_label(fy, q):
@@ -138,6 +153,8 @@ def write_raw_model_workbook(companies, path):
     _write_meta_data(wb.add_sheet("Meta Data"), companies)
     _write_event_log(wb.add_sheet("Event Log"))
     _write_review(wb.add_sheet("Review"), companies, multi)
+    if any(_stmt(c) for c in companies):
+        _write_statement_detail(wb.add_sheet("As-Reported"), companies, multi)
     if any(_seg(c) for c in companies):
         _write_segment_detail(wb.add_sheet("Segment Detail"), companies, multi)
         _write_segment_pivot(wb.add_sheet("Segment Pivot"), companies, multi)
@@ -149,6 +166,11 @@ def write_raw_model_workbook(companies, path):
 def _seg(company):
     """company 튜플에서 seg_detail(없으면 None)."""
     return company[3] if len(company) > 3 else None
+
+
+def _stmt(company):
+    """company 튜플에서 statement_detail(as-reported 전체 재무제표, 없으면 None)."""
+    return company[4] if len(company) > 4 else None
 
 
 def _qlabel(q):
@@ -280,6 +302,54 @@ def _write_review(ws, companies, multi):
     if not any_flag:
         ws.write(2, 1, "검토 필요 항목 없음.")
     ws.freeze(2, 1)
+
+
+# ---- as-reported 전체 재무제표 시트 (As-Reported) --------------------
+
+def _write_statement_detail(ws, companies, multi):
+    """공시 원문 전체 재무제표(표준화 안 함) — 3대 제표 본표 라인 as-reported.
+
+    canonical_map 의 고정 표준 라인에 없는 항목(회사 커스텀 태그·미매핑 표준 태그)
+    까지 놓치지 않고 그대로 보존한다. [구분 | 년도 | 분기 | Index | 항목(원본) |
+    us-gaap 태그 | 값 | 기간]. 구분은 canonical 소속을 권위적으로, 모르면 추정
+    (노란칸)한다. 값 스케일은 unitRef 기준(_scale_asrep)."""
+    ws.write(1, 1, "As-Reported — 공시 원문 전체 재무제표(표준화 안 함)", bold=True)
+    ws.write(1, 5, UNIT_NOTE_ASREP, bold=True, fill=NOTE_FILL)
+    headers = (["Ticker"] if multi else []) + \
+        ["구분", "년도", "분기", "Index", "항목(원본)", "us-gaap 태그", "값", "기간"]
+    for i, h in enumerate(headers, start=1):
+        ws.write(2, i, h, bold=True, fill=HEADER_FILL)
+    widths = ([10] if multi else []) + [12, 8, 6, 8, 30, 44, 16, 9]
+    for i, w in enumerate(widths, start=1):
+        ws.set_col_width(i, w)
+    r = 3
+    for company in companies:
+        stmt = _stmt(company)
+        if not stmt:
+            continue
+        ticker = company[0]
+        for row in sorted(stmt["rows"], key=lambda x: (
+                _STMT_ORDER.get(x["statement"], 9), x["concept"], x["year"],
+                99 if x["quarter"] == "FY" else x["quarter"])):
+            q = row["quarter"]
+            c = 1
+            if multi:
+                ws.write(r, c, ticker); c += 1
+            # 구분: 추정 분류(canonical 밖)면 노란 강조.
+            ws.write(r, c, row["statement_ko"],
+                     fill="FFF2CC" if row["guessed"] else None); c += 1
+            ws.write(r, c, row["year"]); c += 1
+            ws.write(r, c, q); c += 1
+            ws.write(r, c, "" if q == "FY" else row["year"] * 4 + q); c += 1
+            ws.write(r, c, row.get("orig", "")); c += 1
+            ws.write(r, c, row["concept"]); c += 1
+            ws.write(r, c, _scale_asrep(row["val"], row.get("unit")),
+                     num_format=MONEY_FMT); c += 1
+            ws.write(r, c, _period_label(row["year"], q))
+            r += 1
+    if r > 3:
+        ws.auto_filter(2, 1, r - 1, len(headers))
+    ws.freeze(3, 1)
 
 
 # ---- as-reported 매출 분해 시트 (Segment Detail / Reconcile / Changes) ----

@@ -250,6 +250,30 @@ def test_scale_per_share_untouched():
     assert rm._scale(5.61, "USD/shares") == 5.61
 
 
+def test_scale_asrep_by_unitref():
+    """as-reported 스케일: usd/shares→백만, per-share·pure·비율→원값."""
+    assert rm._scale_asrep(123456789, "usd") == 123.456789
+    assert rm._scale_asrep(500000000, "shares") == 500.0
+    assert rm._scale_asrep(5.61, "usdPerShare") == 5.61     # usd+share → per-share
+    assert rm._scale_asrep(0.21, "pure") == 0.21           # 비율 원값
+    assert rm._scale_asrep(42, None) == 42                 # 단위 불명 → 원값
+
+
+def test_instant_from_facts():
+    from datetime import date
+    fy_start = date(2023, 1, 30)
+    cal = {(2024, 1): {"start": fy_start, "end": date(2023, 4, 30)},
+           (2024, 2): {"start": fy_start, "end": date(2023, 7, 30)},
+           (2024, 4): {"start": fy_start, "end": date(2024, 1, 28)}}
+    facts = [{"val": 1000, "start": None, "end": "2023-04-30", "filed": "2023-05-01"},
+             {"val": 1100, "start": None, "end": "2023-07-30", "filed": "2023-08-01"},
+             {"val": 1400, "start": None, "end": "2024-01-28", "filed": "2024-02-01"}]
+    assert qt.instant_from_facts(facts, cal, 2024, 1)["val"] == 1000
+    assert qt.instant_from_facts(facts, cal, 2024, 2)["val"] == 1100
+    assert qt.instant_from_facts(facts, cal, 2024, "FY")["val"] == 1400   # 연말 잔액
+    assert qt.instant_from_facts(facts, cal, 2024, 3) is None            # 값 없음
+
+
 def test_build_rows_attaches_orig_item():
     """label_map 이 주어지면 각 행에 공시 표시라벨(원본 항목명)을 붙인다."""
     c = cf({"Revenues": _usd([f(8288000000, "Q1", "Q1")])})
