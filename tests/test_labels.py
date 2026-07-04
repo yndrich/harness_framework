@@ -80,6 +80,20 @@ def test_standard_beats_verbose():
     assert m["us-gaap:GrossProfit"] == "Gross margin"
 
 
+def test_member_role_suffix_stripped():
+    """차원 멤버 표준 라벨의 ' [Member]' 접미사는 표시용으로 벗긴다."""
+    xml = LAB_XML.replace("Data Center", "Data Center [Member]")
+    m = lb.parse_label_linkbase(xml)
+    assert m["nvda:DataCenterMember"] == "Data Center"
+
+
+def test_clean_label_strips_only_trailing_bracket():
+    assert lb._clean_label("Gross Profit [Member]") == "Gross Profit"
+    assert lb._clean_label("Cost of sales") == "Cost of sales"
+    # 대괄호만 있는 라벨은 원문 유지(빈 문자열 방지)
+    assert lb._clean_label("[Member]") == "[Member]"
+
+
 def test_bad_xml_returns_empty():
     assert lb.parse_label_linkbase("<not xml <<<") == {}
 
