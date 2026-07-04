@@ -21,6 +21,7 @@ from . import submissions as sub
 from . import xbrl_instance as xi
 from . import segments as seg
 from . import segment_detail as sd
+from . import labels as lb
 from . import quarterly as qt
 from .raw_model import write_raw_model_workbook, build_rows
 from .excel import write_workbook
@@ -92,6 +93,26 @@ def build_company(client, ticker, n_years, refresh, with_segments=False):
     return result, years, n_flags
 
 
+def _fetch_label_map(client, ticker, cik10, with_segments):
+    """공시 label linkbase 에서 concept→표시라벨 맵을 받는다(best-effort).
+
+    Raw Data/Segment Detail 의 '항목(원본)' 열에 쓸 공시 원문 라벨. 편의 열이라
+    실패는 조용히 빈 맵으로 폴백한다(핵심 출력 불변). --segments 면 10-Q 멤버 라벨
+    까지 필요하므로 정기공시(10-K+10-Q)를, 아니면 최신 10-K 몇 건을 훑는다.
+    """
+    try:
+        if with_segments:
+            filings = sub.list_periodic_filings(client, cik10, n_annual=2,
+                                                n_quarterly=3)
+        else:
+            filings = sub.list_annual_filings(client, cik10, 3)
+        return lb.fetch_label_map(client, int(cik10), filings)
+    except Exception as e:  # noqa: BLE001 - 라벨 취득 실패가 핵심 경로를 죽이지 않게
+        print(f"[skip] {ticker} labels: 표시라벨 취득 실패: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return {}
+
+
 def build_raw_company(client, ticker, n_quarters, refresh, with_segments=False,
                       period_specs=None):
     """--raw-model 경로: 분기 tidy 행 생성 (+선택적 as-reported 매출 분해).
@@ -108,19 +129,25 @@ def build_raw_company(client, ticker, n_quarters, refresh, with_segments=False,
         periods = qt.select_periods(available, period_specs)
     else:
         periods = available[-n_quarters:] if n_quarters else available
-    rows = build_rows(cf, STATEMENTS, periods, calendar=calendar)
+    label_map = _fetch_label_map(client, info["ticker"], info["cik10"],
+                                 with_segments)
+    rows = build_rows(cf, STATEMENTS, periods, calendar=calendar,
+                      label_map=label_map)
     n_flags = sum(len(r.get("flags", [])) for r in rows)
     seg_detail = None
     if with_segments:
         seg_detail = _build_segment_detail(
-            client, info["ticker"], info["cik10"], calendar, periods, n_quarters)
+            client, info["ticker"], info["cik10"], calendar, periods, n_quarters,
+            label_map=label_map)
     return info["ticker"], rows, periods, n_flags, seg_detail
 
 
-def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters):
+def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters,
+                          label_map=None):
     """10-K+10-Q inline-XBRL 을 파싱해 as-reported 분기/연간 매출 분해를 만든다.
 
     부분 결과 원칙: 한 공시 파싱이 실패해도 그 부분만 건너뛴다. 전체 실패면 None.
+    label_map: 멤버 표시라벨(원본 항목명) 맵 — build_as_reported 에 전달.
     """
     try:
         filings = sub.list_periodic_filings(client, cik10, n_annual=6,
@@ -147,7 +174,7 @@ def _build_segment_detail(client, ticker, cik10, calendar, periods, n_quarters):
         return None
     annual_years = sorted({fy for fy, _ in periods})
     return sd.build_as_reported(facts, _revenue_tags(STATEMENTS), calendar,
-                                periods, annual_years)
+                                periods, annual_years, label_map=label_map)
 
 
 def main(argv=None, client=None) -> int:

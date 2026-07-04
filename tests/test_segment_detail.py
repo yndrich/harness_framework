@@ -119,6 +119,26 @@ def test_alias_layer_optional_and_preserves_raw():
     assert member_label("nvda:DefinitelyNotAMember") is None
 
 
+def test_orig_label_attached_from_label_map():
+    """label_map 이 주어지면 각 분해 행에 공시 표시라벨(원본)을 붙인다.
+    멤버 QName 은 그대로 보존하고, 원본 라벨은 별도 필드로만 덧붙는다."""
+    lmap = {"nvda:DataCenterMember": "Data Center", "country:US": "United States"}
+    out = sd.build_as_reported(_facts(), [sd._local(REV)], CAL,
+                               periods=[(2024, 1), (2024, 2)],
+                               annual_years=[2024], label_map=lmap)
+    dc = next(r for r in out["rows"] if r["member"] == "nvda:DataCenterMember")
+    assert dc["orig"] == "Data Center"                # 공시 원문 라벨
+    assert dc["member"] == "nvda:DataCenterMember"    # 원본 QName 보존
+    # 라벨맵에 없는 멤버는 공란(핵심 출력 불변)
+    sg = next(r for r in out["rows"] if r["member"] == "country:SG")
+    assert sg["orig"] == ""
+
+
+def test_orig_label_blank_without_map():
+    out = _build()   # label_map 미전달
+    assert all(r["orig"] == "" for r in out["rows"])
+
+
 def _read_sheet(z, idx):
     from xml.etree import ElementTree as ET
     ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -147,14 +167,14 @@ def test_segment_detail_uses_raw_data_tidy_schema():
     for nm in ("Segment Detail", "Segment Reconcile", "Segment Changes"):
         assert nm in idx, f"{nm} 시트 없음"
     rows = _read_sheet(z, idx["Segment Detail"])
-    assert rows[1] == ["년도", "분기", "Index", "항목", "값", "Canonical Key",
-                       "기간"], rows[1]
+    assert rows[1] == ["년도", "분기", "Index", "항목(원본)", "항목", "값",
+                       "Canonical Key", "기간"], rows[1]
     # 데이터센터 2024 Q1: 항목=별칭, Key=멤버 QName, Index=년도×4+분기, 기간 라벨
-    dc = next(r for r in rows[2:] if len(r) >= 6
-              and r[5] == "nvda:DataCenterMember" and r[1] == "1")
+    dc = next(r for r in rows[2:] if len(r) >= 7
+              and r[6] == "nvda:DataCenterMember" and r[1] == "1")
     assert dc[0] == "2024" and dc[2] == str(2024 * 4 + 1)   # Index
-    assert dc[3] == "데이터센터"                              # 항목=별칭
-    assert dc[6] == "24' Q1"                                # 기간 라벨
+    assert dc[4] == "데이터센터"                              # 항목=별칭
+    assert dc[7] == "24' Q1"                                # 기간 라벨
     # Segment Pivot / Raw Pivot 시트도 생성된다
     assert "Segment Pivot" in idx and "Raw Pivot" in idx
     os.remove(path)

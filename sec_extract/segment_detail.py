@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from . import quarterly as qt
 from .canonical_map import axis_label, member_label
+from .labels import label_for
 from .normalize import REL_TOL, _rel_diff
 
 OVERLAP_RATIO = 1.5   # 멤버합/총계 가 이보다 크면 '한 축에 분류가 겹침'으로 본다.
@@ -82,7 +83,7 @@ def _value_for(series, calendar, year, quarter):
 
 
 def build_as_reported(facts, concept_tags, calendar, periods,
-                      annual_years=None):
+                      annual_years=None, label_map=None):
     """충실 as-reported 매출 분해.
 
     facts: 인스턴스 fact 리스트(각 concept/value/dims/start/end/accn/filed/form).
@@ -90,9 +91,12 @@ def build_as_reported(facts, concept_tags, calendar, periods,
     calendar: qt.fiscal_calendar 결과.
     periods: [(fy, q)] 분기 목록.
     annual_years: 연간(FY) 행을 만들 회계연도들(기본 = periods 의 fy 집합).
+    label_map: (선택) 공시 label linkbase 의 concept→표시라벨 맵. 각 행의 멤버
+        QName 을 여기서 찾아 '원본' 표시라벨(예: "Data Center")을 붙인다. 없으면 "".
 
     반환 {rows, reconcile, changes} — 자세한 필드는 모듈/raw_model 참조.
     """
+    lmap = label_map or {}
     members, totals, restated = _series_index(facts, concept_tags)
     if annual_years is None:
         annual_years = sorted({fy for fy, _ in periods})
@@ -114,6 +118,9 @@ def build_as_reported(facts, concept_tags, calendar, periods,
                 # 별칭 레이어(선택적 표시 라벨) — 원본 axis/member 는 그대로 유지.
                 "axis_label": axis_label(axis),
                 "label": member_label(member),   # 미정의면 None(빈칸)
+                # '원본' = 공시 label linkbase 의 멤버 표시라벨(예: "Data Center").
+                # 별칭(사람이 만든 한글)과 별개로 공시 원문 이름을 나란히 보존한다.
+                "orig": label_for(lmap, member),
                 "concept": _local((cell["fact"] or {}).get("concept") or ""),
                 "val": cell["val"], "method": cell["method"],
                 "accn": (cell["fact"] or {}).get("accn") or "",

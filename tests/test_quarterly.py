@@ -250,6 +250,24 @@ def test_scale_per_share_untouched():
     assert rm._scale(5.61, "USD/shares") == 5.61
 
 
+def test_build_rows_attaches_orig_item():
+    """label_map 이 주어지면 각 행에 공시 표시라벨(원본 항목명)을 붙인다."""
+    c = cf({"Revenues": _usd([f(8288000000, "Q1", "Q1")])})
+    lmap = {"us-gaap:Revenues": "Total net revenue"}
+    rows = rm.build_rows(c, STATEMENTS, [(2023, 1)], label_map=lmap)
+    r = next(row for row in rows if row["key"] == "revenue" and row["val"] is not None)
+    assert r["orig_item"] == "Total net revenue"   # 공시 원문 라벨
+    assert r["tag"] == "Revenues"                   # 채택된 us-gaap 태그도 기록
+
+
+def test_build_rows_orig_item_blank_without_map():
+    """label_map 없으면 원본 항목명은 공란(핵심 출력 불변)."""
+    c = cf({"Revenues": _usd([f(8288000000, "Q1", "Q1")])})
+    rows = rm.build_rows(c, STATEMENTS, [(2023, 1)])
+    r = next(row for row in rows if row["key"] == "revenue" and row["val"] is not None)
+    assert r["orig_item"] == ""
+
+
 # ---- 분기 선택(--period) -------------------------------------------
 def test_parse_period_token():
     assert qt.parse_period_token("2025Q1") == (2025, 1)
@@ -296,6 +314,47 @@ def test_select_periods_unavailable_raises():
         except ValueError:
             continue
         raise AssertionError(f"미존재 분기여야 함: {bad}")
+
+
+# ---- Raw Data 시트 쓰기(헤더·원본 열·단위 표시) -----------------------
+def _read_sheet(z, idx):
+    from xml.etree import ElementTree as ET
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    def val(c):
+        if c.get("t") == "inlineStr":
+            return "".join(n.text or "" for n in c.iter() if n.tag.endswith('}t'))
+        v = c.find("a:v", ns)
+        return v.text if v is not None else ""
+    t = ET.fromstring(z.read(f"xl/worksheets/sheet{idx}.xml"))
+    return [[val(c) for c in r.findall("a:c", ns)] for r in t.findall(".//a:row", ns)]
+
+
+def test_raw_data_sheet_has_orig_column_and_unit_note():
+    import zipfile
+    from xml.etree import ElementTree as ET
+    from sec_extract.raw_model import write_raw_model_workbook, UNIT_NOTE
+    c = cf({"Revenues": _usd([f(8288000000, "Q1", "Q1")])})
+    lmap = {"us-gaap:Revenues": "Total net revenue"}
+    rows = rm.build_rows(c, STATEMENTS, [(2023, 1)], label_map=lmap)
+    path = os.path.join(os.path.dirname(__file__), "_smoke_raw.xlsx")
+    write_raw_model_workbook([("T", rows, [(2023, 1)])], path)
+    try:
+        z = zipfile.ZipFile(path)
+        names = [s.get("name")
+                 for s in ET.fromstring(z.read("xl/workbook.xml")).iter()
+                 if s.tag.endswith("}sheet")]
+        idx = {nm: i + 1 for i, nm in enumerate(names)}
+        sheet = _read_sheet(z, idx["Raw Data"])
+        assert sheet[1] == ["년도", "분기", "Index", "항목(원본)", "항목", "값",
+                            "Canonical Key", "기간"], sheet[1]
+        rev = next(r for r in sheet[2:] if len(r) >= 5 and r[3] == "Total net revenue")
+        assert rev[4] == "매출"                       # 항목(표준 한글) 그대로
+        # 단위 안내가 시트 상단 어딘가에 존재
+        flat = [cell for row in sheet for cell in row]
+        assert UNIT_NOTE in flat, "단위 표시 없음"
+    finally:
+        os.remove(path)
 
 
 # ---- 독립 실행 러너 ---------------------------------------------------

@@ -2,25 +2,36 @@
 
 사용자의 엑셀 모델 스키마에 맞춰 분기 데이터를 떨군다(붙여넣기/링크용 별도 파일).
 시트 구성:
-- Raw Data : Raw_Financial 스키마 [년도 | 분기 | Index | 항목 | 값 | Canonical Key]
-             (기존 스키마에 Canonical Key 한 열을 덧붙임 — 기존 Model SUMIFS 는 그대로 동작)
+- Raw Data : Raw_Financial 스키마
+             [년도 | 분기 | Index | 항목(원본) | 항목 | 값 | Canonical Key | 기간]
+             · 항목(원본) = 공시 label linkbase 표시라벨(예: "Net sales") — 실제
+               재무제표와 매칭용. label_map 없으면 공란.
+             · 항목 = 표준화 한글 라벨(예: 매출).
+             주의: 항목(원본)을 항목 앞에 끼워 '값' 열이 한 칸 우측 이동한다 →
+             기존 모델은 위치 대신 Canonical Key 기준 SUMIFS 사용을 권장.
 - Meta Data: Period_Table [년도 | 분기 | Index | QuarterLabel]
 - Event Log: [년도 | 분기 | INDEX | 구분 | 설명] 헤더만(정성 메모는 사람이 입력)
 - Review   : 분기 추출에서 생긴 검토 플래그(있으면)
 
-값 단위: 달러/주식은 백만 단위로 스케일(사용자 모델이 $M 기준). Index = 년도×4 + 분기.
+값 단위: 달러/주식은 백만 단위로 스케일(사용자 모델이 $M 기준). 각 값 시트 상단에
+단위 안내(UNIT_NOTE)를 표기해 million/thousand 혼동을 막는다. Index = 년도×4 + 분기.
 """
 
 from __future__ import annotations
 
 from .xlsx import Workbook
 from .canonical_map import line_ko, member_label, axis_label, STATEMENTS
+from .labels import label_for
 from . import quarterly as qt
 
 HEADER_FILL = "D9E1F2"
 SECTION_FILL = "E2EFDA"
 TITLE = "Raw_Financial"
 MONEY_FMT = "#,##0.##"
+NOTE_FILL = "FCE4D6"
+# 값 스케일 안내(모든 값 시트 상단에 표기 — million/thousand 혼동 방지).
+UNIT_NOTE = "값 단위: 백만 USD ($M)  ·  주식수=백만 주  ·  주당값(EPS)=달러/주"
+UNIT_NOTE_SEG = "값 단위: 백만 USD ($M)"
 
 
 def _scale(val, unit):
@@ -37,14 +48,17 @@ def _period_label(fy, q):
     return f"{fy % 100:02d}' Q{q}"
 
 
-def build_rows(facts_obj, statements, periods, calendar=None):
-    """tidy 행 리스트. 각 행: dict(year,q,index,item,val,key,method,flags,fact,unit).
+def build_rows(facts_obj, statements, periods, calendar=None, label_map=None):
+    """tidy 행 리스트. 각 행: dict(year,q,index,item,orig_item,tag,val,key,...).
 
     calendar(매출 기준 회계 분기 달력)를 모든 항목에 공유해, fy 라벨이 비교표시로
     흩어진 값도 실제 날짜로 정확히 매핑한다(없으면 여기서 한 번 만든다).
+    label_map: (선택) 공시 label linkbase 의 concept→표시라벨 맵. 채택된 us-gaap
+        태그를 여기서 찾아 '원본' 항목명(예: "Net sales")을 붙인다. 없으면 "".
     """
     if calendar is None:
         calendar = qt.fiscal_calendar(facts_obj, statements)
+    lmap = label_map or {}
     order = {p: i for i, p in enumerate(periods)}
     rows = []
     last = periods[-1] if periods else None
@@ -59,6 +73,7 @@ def build_rows(facts_obj, statements, periods, calendar=None):
                     fy, q = last
                     rows.append({
                         "year": fy, "q": q, "index": fy * 4 + q, "item": ko,
+                        "orig_item": "", "tag": None,
                         "val": None, "key": line["key"], "method": "",
                         "flags": [("REVIEW", line.get("note") or
                                    "companyfacts 에 단일 fact 없음 — inline-XBRL 필요")],
@@ -73,9 +88,11 @@ def build_rows(facts_obj, statements, periods, calendar=None):
                     continue
                 u = cell.get("unit") or unit
                 got.add((fy, q))
+                tag = cell.get("tag")
                 rows.append({
                     "year": fy, "q": q, "index": fy * 4 + q,
-                    "item": ko, "val": _scale(cell["val"], u),
+                    "item": ko, "orig_item": label_for(lmap, tag), "tag": tag,
+                    "val": _scale(cell["val"], u),
                     "key": line["key"], "method": cell.get("method"),
                     "flags": cell.get("flags", []), "fact": cell.get("fact"),
                 })
@@ -100,6 +117,7 @@ def _gap_rows(line, ko, periods, order, got):
         if lo < i < hi and (fy, q) not in got:
             out.append({
                 "year": fy, "q": q, "index": fy * 4 + q, "item": ko,
+                "orig_item": "", "tag": None,
                 "val": None, "key": line["key"], "method": "",
                 "flags": [("GAP", "SEC companyfacts 에 해당 분기 값 없음 "
                            "(차분 불가/미보고)")],
@@ -139,13 +157,15 @@ def _qlabel(q):
 
 def _write_raw_data(ws, companies, multi):
     ws.write(1, 1, TITLE, bold=True)
-    # 기존 모델 스키마(년도|분기|Index|항목|값) + Canonical Key 뒤에 기간 라벨을
-    # 끝에 덧붙인다(끝열 추가라 기존 열 위치·SUMIFS 불변 → 비파괴적).
+    ws.write(1, 3, UNIT_NOTE, bold=True, fill=NOTE_FILL)   # 값 단위 안내(상단)
+    # 기존 모델 스키마(년도|분기|Index|항목|값) + '항목(원본)'(공시 표시라벨)을 항목
+    # 앞에, Canonical Key·기간을 끝에 덧붙인다. 값/Key 는 여전히 뒤쪽이라 기존 모델의
+    # 열 참조가 깨질 수 있으므로 SUMIFS 는 Canonical Key 기준 사용을 권장(문서화).
     headers = (["Ticker"] if multi else []) + \
-        ["년도", "분기", "Index", "항목", "값", "Canonical Key", "기간"]
+        ["년도", "분기", "Index", "항목(원본)", "항목", "값", "Canonical Key", "기간"]
     for i, h in enumerate(headers, start=1):
         ws.write(2, i, h, bold=True, fill=HEADER_FILL)
-    widths = ([10] if multi else []) + [8, 6, 8, 20, 16, 22, 9]
+    widths = ([10] if multi else []) + [8, 6, 8, 30, 20, 16, 22, 9]
     for i, w in enumerate(widths, start=1):
         ws.set_col_width(i, w)
     r = 3
@@ -159,6 +179,7 @@ def _write_raw_data(ws, companies, multi):
             ws.write(r, c, row["year"]); c += 1
             ws.write(r, c, row["q"]); c += 1
             ws.write(r, c, row["index"]); c += 1
+            ws.write(r, c, row.get("orig_item", "")); c += 1
             ws.write(r, c, row["item"]); c += 1
             ws.write(r, c, row["val"], num_format=MONEY_FMT); c += 1
             ws.write(r, c, row["key"]); c += 1
@@ -172,6 +193,7 @@ def _write_raw_data(ws, companies, multi):
 def _write_raw_pivot(ws, companies, multi):
     """항목 × 분기 행렬 (읽기용). tidy 와 같은 값, 보기 좋게 가로 배치 + 행별 색조."""
     ws.write(1, 1, "Raw Pivot — 항목 × 분기 (행별 값 색조)", bold=True)
+    ws.write(1, 4, UNIT_NOTE, bold=True, fill=NOTE_FILL)
     periods = sorted({p for c in companies for p in c[2]})
     first_val = 2
     ncols = first_val + len(periods) - 1
@@ -270,11 +292,12 @@ def _write_segment_detail(ws, companies, multi):
     Canonical Key(=멤버 QName)로 구분해 펼친다. 항목=별칭(없으면 멤버 QName),
     Index=년도×4+분기(Period_Table 과 동일 조인 키, FY 행은 분기 개념이 아니라 빈칸)."""
     ws.write(1, 1, "Segment_Financial", bold=True)
+    ws.write(1, 3, UNIT_NOTE_SEG, bold=True, fill=NOTE_FILL)   # 값 단위 안내(상단)
     headers = (["Ticker"] if multi else []) + \
-        ["년도", "분기", "Index", "항목", "값", "Canonical Key", "기간"]
+        ["년도", "분기", "Index", "항목(원본)", "항목", "값", "Canonical Key", "기간"]
     for i, h in enumerate(headers, start=1):
         ws.write(2, i, h, bold=True, fill=HEADER_FILL)
-    widths = ([10] if multi else []) + [8, 6, 8, 26, 16, 40, 9]
+    widths = ([10] if multi else []) + [8, 6, 8, 26, 26, 16, 40, 9]
     for i, w in enumerate(widths, start=1):
         ws.set_col_width(i, w)
     r = 3
@@ -287,6 +310,7 @@ def _write_segment_detail(ws, companies, multi):
                 99 if x["quarter"] == "FY" else x["quarter"])):
             q = row["quarter"]
             lab = row.get("label")
+            orig = row.get("orig", "")
             c = 1
             if multi:
                 ws.write(r, c, ticker); c += 1
@@ -295,6 +319,9 @@ def _write_segment_detail(ws, companies, multi):
             ws.write(r, c, q); c += 1
             # Index = 년도×4+분기 (분기행만), FY 는 빈칸.
             ws.write(r, c, "" if q == "FY" else row["year"] * 4 + q); c += 1
+            # 항목(원본) = 공시 표시라벨(예: "Data Center"). 없으면 노란 강조(공시가
+            # 이 멤버에 로컬 라벨을 안 붙였거나 표준 택소노미 멤버 → 라벨 미취득).
+            ws.write(r, c, orig, fill=None if orig else "FFF2CC"); c += 1
             # 항목 = 별칭. 미정의면 멤버 QName 으로 채우고 노란 강조(채울 대상 표시).
             ws.write(r, c, lab or row["member"],
                      fill=None if lab else "FFF2CC"); c += 1
@@ -310,6 +337,7 @@ def _write_segment_detail(ws, companies, multi):
 def _write_segment_pivot(ws, companies, multi):
     """축·멤버 × 분기 행렬 (읽기용, FY 제외). 축별 섹션 + 행별 값 색조."""
     ws.write(1, 1, "Segment Pivot — 축·멤버 × 분기 (행별 값 색조)", bold=True)
+    ws.write(1, 4, UNIT_NOTE_SEG, bold=True, fill=NOTE_FILL)
     periods = sorted({(row["year"], row["quarter"])
                       for c in companies if _seg(c)
                       for row in _seg(c)["rows"] if row["quarter"] != "FY"})
